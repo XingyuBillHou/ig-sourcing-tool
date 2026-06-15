@@ -667,7 +667,7 @@ def apply_scale_preset(preset: str) -> tuple[int, int]:
 def main():
     st.set_page_config(
         page_title="IG 红人 Sourcing 工具",
-        page_icon="🔍",
+        page_icon=".streamlit/favicon.png",
         layout="wide",
         initial_sidebar_state="expanded",
     )
