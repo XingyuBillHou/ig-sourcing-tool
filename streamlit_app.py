@@ -894,7 +894,7 @@ def main():
             use_container_width=True,
             hide_index=True,
             column_config={
-                "账号主页链接": st.column_config.LinkColumn("主页链接", display_text="打开主页"),
+                "账号主页链接": st.column_config.LinkColumn("主页链接"),
                 "账号类型": st.column_config.TextColumn("类型"),
                 "粉丝数": st.column_config.NumberColumn("粉丝数", format="%d"),
                 "互动率评估": st.column_config.TextColumn("互动率"),
