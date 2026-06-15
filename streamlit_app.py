@@ -173,6 +173,15 @@ def account_type_label(account_type: AccountType) -> str:
     return {"brand": "品牌", "influencer": "红人", "unknown": "待确认"}[account_type]
 
 
+def _get_default_dataset_id(run) -> Optional[str]:
+    """从 Apify run 结果提取 dataset ID（兼容 dict 与 apify-client v3+ 的 Run 模型）。"""
+    if run is None:
+        return None
+    if isinstance(run, dict):
+        return run.get("defaultDatasetId") or run.get("default_dataset_id")
+    return getattr(run, "default_dataset_id", None)
+
+
 # =========================================================================
 # 模块二 + 模块三: 核心抓取与数据处理类 (OOP 封装)
 # =========================================================================
@@ -203,7 +212,7 @@ class InfluencerSourcer:
         except Exception as e:
             raise RuntimeError(f"调用贴文抓取 Actor 失败: {e}") from e
 
-        dataset_id = (run or {}).get("defaultDatasetId")
+        dataset_id = _get_default_dataset_id(run)
         if not dataset_id:
             raise RuntimeError("Actor 运行结束但未返回数据集 ID, 请检查 Actor 配置。")
 
@@ -273,7 +282,7 @@ class InfluencerSourcer:
         except Exception as e:
             raise RuntimeError(f"调用主页抓取 Actor 失败: {e}") from e
 
-        dataset_id = (run or {}).get("defaultDatasetId")
+        dataset_id = _get_default_dataset_id(run)
         if not dataset_id:
             raise RuntimeError("主页 Actor 运行结束但未返回数据集 ID。")
 
