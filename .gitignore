@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+launch.log
+ig-sourcing-tool.zip
+ig-sourcing-tool/installers/
+*.pkg
+*.exe
