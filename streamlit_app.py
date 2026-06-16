@@ -553,69 +553,117 @@ def inject_custom_css() -> None:
         """
         <style>
         :root {
-            --app-bg: #ffffff;
+            --app-bg: #f4f6f9;
+            --main-bg: #ffffff;
             --sidebar-bg: #f8fafc;
+            --surface: #ffffff;
+            --surface-muted: #f1f5f9;
             --text-primary: #0f172a;
             --text-secondary: #475569;
             --text-muted: #64748b;
             --border-color: #e2e8f0;
+            --border-subtle: #eef2f7;
             --hero-bg: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
             --card-bg: #ffffff;
             --step-accent: #4f46e5;
             --tip-bg: #fff7ed;
             --tip-border: #fed7aa;
             --tip-text: #9a3412;
-            --metric-bg: rgba(248, 250, 252, 0.8);
+            --metric-bg: #f8fafc;
+            --input-bg: #ffffff;
+            --input-text: #0f172a;
+            --input-border: #cbd5e1;
+            --input-focus: #6366f1;
+            --form-bg: #fafbfc;
+            --divider: #e2e8f0;
+            --link: #4f46e5;
+            --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
         }
 
         @media (prefers-color-scheme: dark) {
             :root:not([data-theme="light"]) {
-                --app-bg: #0f172a;
-                --sidebar-bg: #111827;
-                --text-primary: #f1f5f9;
-                --text-secondary: #cbd5e1;
-                --text-muted: #94a3b8;
-                --border-color: #334155;
-                --hero-bg: linear-gradient(135deg, #1e293b 0%, #312e81 100%);
-                --card-bg: #1e293b;
-                --step-accent: #818cf8;
-                --tip-bg: #422006;
-                --tip-border: #9a3412;
-                --tip-text: #fed7aa;
-                --metric-bg: rgba(30, 41, 59, 0.8);
+                --app-bg: #090b10;
+                --main-bg: #0f131a;
+                --sidebar-bg: #0c1017;
+                --surface: #151b24;
+                --surface-muted: #1a2230;
+                --text-primary: #edf2f7;
+                --text-secondary: #c4d0de;
+                --text-muted: #8fa0b3;
+                --border-color: #2a3545;
+                --border-subtle: #1e2735;
+                --hero-bg: linear-gradient(145deg, #121820 0%, #161f2b 50%, #1a2433 100%);
+                --card-bg: #151b24;
+                --step-accent: #7c89ff;
+                --tip-bg: #172033;
+                --tip-border: #334155;
+                --tip-text: #cbd5e1;
+                --metric-bg: #151b24;
+                --input-bg: #1a2230;
+                --input-text: #edf2f7;
+                --input-border: #334155;
+                --input-focus: #7c89ff;
+                --form-bg: #121820;
+                --divider: #2a3545;
+                --link: #93a4ff;
+                --shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
             }
         }
 
         :root[data-theme="light"] {
-            --app-bg: #ffffff;
+            --app-bg: #f4f6f9;
+            --main-bg: #ffffff;
             --sidebar-bg: #f8fafc;
+            --surface: #ffffff;
+            --surface-muted: #f1f5f9;
             --text-primary: #0f172a;
             --text-secondary: #475569;
             --text-muted: #64748b;
             --border-color: #e2e8f0;
+            --border-subtle: #eef2f7;
             --hero-bg: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
             --card-bg: #ffffff;
             --step-accent: #4f46e5;
             --tip-bg: #fff7ed;
             --tip-border: #fed7aa;
             --tip-text: #9a3412;
-            --metric-bg: rgba(248, 250, 252, 0.8);
+            --metric-bg: #f8fafc;
+            --input-bg: #ffffff;
+            --input-text: #0f172a;
+            --input-border: #cbd5e1;
+            --input-focus: #6366f1;
+            --form-bg: #fafbfc;
+            --divider: #e2e8f0;
+            --link: #4f46e5;
+            --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
         }
 
         :root[data-theme="dark"] {
-            --app-bg: #0f172a;
-            --sidebar-bg: #111827;
-            --text-primary: #f1f5f9;
-            --text-secondary: #cbd5e1;
-            --text-muted: #94a3b8;
-            --border-color: #334155;
-            --hero-bg: linear-gradient(135deg, #1e293b 0%, #312e81 100%);
-            --card-bg: #1e293b;
-            --step-accent: #818cf8;
-            --tip-bg: #422006;
-            --tip-border: #9a3412;
-            --tip-text: #fed7aa;
-            --metric-bg: rgba(30, 41, 59, 0.8);
+            --app-bg: #090b10;
+            --main-bg: #0f131a;
+            --sidebar-bg: #0c1017;
+            --surface: #151b24;
+            --surface-muted: #1a2230;
+            --text-primary: #edf2f7;
+            --text-secondary: #c4d0de;
+            --text-muted: #8fa0b3;
+            --border-color: #2a3545;
+            --border-subtle: #1e2735;
+            --hero-bg: linear-gradient(145deg, #121820 0%, #161f2b 50%, #1a2433 100%);
+            --card-bg: #151b24;
+            --step-accent: #7c89ff;
+            --tip-bg: #172033;
+            --tip-border: #334155;
+            --tip-text: #cbd5e1;
+            --metric-bg: #151b24;
+            --input-bg: #1a2230;
+            --input-text: #edf2f7;
+            --input-border: #334155;
+            --input-focus: #7c89ff;
+            --form-bg: #121820;
+            --divider: #2a3545;
+            --link: #93a4ff;
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
         }
 
         .stApp {
@@ -623,10 +671,33 @@ def inject_custom_css() -> None:
             color: var(--text-primary);
         }
 
-        .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+        [data-testid="stAppViewContainer"] .main {
+            background-color: var(--main-bg);
+        }
 
-        h1, h2, h3, h4, h5, h6, p, label, span, div[data-testid="stMarkdownContainer"] {
-            color: inherit;
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 2rem;
+        }
+
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stMarkdownContainer"] h3,
+        [data-testid="stMarkdownContainer"] h4,
+        [data-testid="stMarkdownContainer"] h5,
+        [data-testid="stMarkdownContainer"] h6 {
+            color: var(--text-primary);
+        }
+
+        [data-testid="stCaptionContainer"] p,
+        [data-testid="stCaptionContainer"] small {
+            color: var(--text-muted) !important;
         }
 
         div[data-testid="stSidebar"] {
@@ -634,8 +705,54 @@ def inject_custom_css() -> None:
             border-right: 1px solid var(--border-color);
         }
 
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        div[data-testid="stSidebar"] label,
+        div[data-testid="stSidebar"] span {
+            color: var(--text-secondary);
+        }
+
         div[data-testid="stSidebar"] .block-container {
             padding-top: 1.25rem;
+        }
+
+        hr {
+            border-color: var(--divider) !important;
+            opacity: 0.9;
+        }
+
+        div[data-testid="stForm"] {
+            background: var(--form-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 1rem 1.1rem 1.2rem;
+            box-shadow: var(--shadow);
+        }
+
+        div[data-testid="stTextInput"] label,
+        div[data-testid="stTextInput"] p,
+        div[data-testid="stRadio"] label,
+        div[data-testid="stSlider"] label,
+        div[data-testid="stToggle"] label {
+            color: var(--text-secondary) !important;
+        }
+
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stTextInput"] textarea {
+            background-color: var(--input-bg) !important;
+            color: var(--input-text) !important;
+            border: 1px solid var(--input-border) !important;
+            border-radius: 10px !important;
+        }
+
+        div[data-testid="stTextInput"] input:focus,
+        div[data-testid="stTextInput"] textarea:focus {
+            border-color: var(--input-focus) !important;
+            box-shadow: 0 0 0 1px var(--input-focus) !important;
+        }
+
+        div[data-testid="stTextInput"] input::placeholder {
+            color: var(--text-muted) !important;
+            opacity: 0.85;
         }
 
         div[data-testid="stMetric"] {
@@ -643,6 +760,7 @@ def inject_custom_css() -> None:
             border: 1px solid var(--border-color);
             border-radius: 12px;
             padding: 0.65rem 0.75rem;
+            box-shadow: var(--shadow);
         }
 
         div[data-testid="stMetric"] label {
@@ -653,12 +771,43 @@ def inject_custom_css() -> None:
             color: var(--text-primary) !important;
         }
 
+        div[data-testid="stAlert"] {
+            background-color: var(--surface-muted) !important;
+            color: var(--text-secondary) !important;
+            border: 1px solid var(--border-color) !important;
+            border-radius: 12px !important;
+        }
+
+        [data-testid="stStatusWidget"] {
+            background-color: var(--surface) !important;
+            border: 1px solid var(--border-color) !important;
+            border-radius: 12px !important;
+        }
+
+        [data-testid="stExpander"] details {
+            background-color: var(--surface);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+        }
+
+        [data-testid="stDataFrame"] {
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+        }
+
+        [data-testid="stLinkButton"] a {
+            border-radius: 10px !important;
+        }
+
         .hero-box {
             background: var(--hero-bg);
             border: 1px solid var(--border-color);
             border-radius: 16px;
             padding: 1.25rem 1.5rem;
             margin-bottom: 1rem;
+            box-shadow: var(--shadow);
         }
 
         .hero-title {
@@ -681,6 +830,7 @@ def inject_custom_css() -> None:
             border-radius: 14px;
             padding: 1rem 1.1rem;
             height: 100%;
+            box-shadow: var(--shadow);
         }
 
         .step-number {
@@ -689,7 +839,7 @@ def inject_custom_css() -> None:
             height: 1.6rem;
             border-radius: 999px;
             background: var(--step-accent);
-            color: white;
+            color: #ffffff;
             text-align: center;
             line-height: 1.6rem;
             font-size: 0.85rem;
@@ -718,6 +868,7 @@ def inject_custom_css() -> None:
             color: var(--tip-text);
             font-size: 0.9rem;
             margin-top: 0.5rem;
+            line-height: 1.55;
         }
         </style>
         """,
