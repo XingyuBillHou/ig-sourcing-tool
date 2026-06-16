@@ -530,35 +530,165 @@ class InfluencerSourcer:
             return None
 
 
-            return None
+THEME_OPTIONS = {
+    "system": "跟随系统",
+    "light": "浅色",
+    "dark": "深色",
+}
+
+
+def apply_theme_to_page(theme_mode: str) -> None:
+    """在父页面 html 上设置 data-theme，供 CSS 与系统偏好联动。"""
+    import streamlit.components.v1 as components
+
+    if theme_mode == "system":
+        script = "parent.document.documentElement.removeAttribute('data-theme');"
+    else:
+        script = f"parent.document.documentElement.setAttribute('data-theme', '{theme_mode}');"
+    components.html(f"<script>{script}</script>", height=0, width=0)
 
 
 def inject_custom_css() -> None:
     st.markdown(
         """
         <style>
+        :root {
+            --app-bg: #ffffff;
+            --sidebar-bg: #f8fafc;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+            --border-color: #e2e8f0;
+            --hero-bg: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+            --card-bg: #ffffff;
+            --step-accent: #4f46e5;
+            --tip-bg: #fff7ed;
+            --tip-border: #fed7aa;
+            --tip-text: #9a3412;
+            --metric-bg: rgba(248, 250, 252, 0.8);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                --app-bg: #0f172a;
+                --sidebar-bg: #111827;
+                --text-primary: #f1f5f9;
+                --text-secondary: #cbd5e1;
+                --text-muted: #94a3b8;
+                --border-color: #334155;
+                --hero-bg: linear-gradient(135deg, #1e293b 0%, #312e81 100%);
+                --card-bg: #1e293b;
+                --step-accent: #818cf8;
+                --tip-bg: #422006;
+                --tip-border: #9a3412;
+                --tip-text: #fed7aa;
+                --metric-bg: rgba(30, 41, 59, 0.8);
+            }
+        }
+
+        :root[data-theme="light"] {
+            --app-bg: #ffffff;
+            --sidebar-bg: #f8fafc;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+            --border-color: #e2e8f0;
+            --hero-bg: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+            --card-bg: #ffffff;
+            --step-accent: #4f46e5;
+            --tip-bg: #fff7ed;
+            --tip-border: #fed7aa;
+            --tip-text: #9a3412;
+            --metric-bg: rgba(248, 250, 252, 0.8);
+        }
+
+        :root[data-theme="dark"] {
+            --app-bg: #0f172a;
+            --sidebar-bg: #111827;
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --border-color: #334155;
+            --hero-bg: linear-gradient(135deg, #1e293b 0%, #312e81 100%);
+            --card-bg: #1e293b;
+            --step-accent: #818cf8;
+            --tip-bg: #422006;
+            --tip-border: #9a3412;
+            --tip-text: #fed7aa;
+            --metric-bg: rgba(30, 41, 59, 0.8);
+        }
+
+        .stApp {
+            background-color: var(--app-bg);
+            color: var(--text-primary);
+        }
+
         .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+
+        h1, h2, h3, h4, h5, h6, p, label, span, div[data-testid="stMarkdownContainer"] {
+            color: inherit;
+        }
+
+        div[data-testid="stSidebar"] {
+            background-color: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+        }
+
+        div[data-testid="stSidebar"] .block-container {
+            padding-top: 1.25rem;
+        }
+
+        div[data-testid="stMetric"] {
+            background: var(--metric-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 0.65rem 0.75rem;
+        }
+
+        div[data-testid="stMetric"] label {
+            color: var(--text-muted) !important;
+        }
+
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+            color: var(--text-primary) !important;
+        }
+
         .hero-box {
-            background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
-            border: 1px solid #e2e8f0;
+            background: var(--hero-bg);
+            border: 1px solid var(--border-color);
             border-radius: 16px;
             padding: 1.25rem 1.5rem;
             margin-bottom: 1rem;
         }
-        .hero-title { font-size: 1.55rem; font-weight: 700; color: #0f172a; margin-bottom: 0.35rem; }
-        .hero-subtitle { color: #475569; font-size: 0.95rem; line-height: 1.6; margin: 0; }
+
+        .hero-title {
+            font-size: 1.55rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 0.35rem;
+        }
+
+        .hero-subtitle {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.6;
+            margin: 0;
+        }
+
         .step-card {
-            background: #ffffff;
-            border: 1px solid #e2e8f0;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
             border-radius: 14px;
             padding: 1rem 1.1rem;
             height: 100%;
         }
+
         .step-number {
             display: inline-block;
-            width: 1.6rem; height: 1.6rem;
+            width: 1.6rem;
+            height: 1.6rem;
             border-radius: 999px;
-            background: #4f46e5;
+            background: var(--step-accent);
             color: white;
             text-align: center;
             line-height: 1.6rem;
@@ -566,22 +696,28 @@ def inject_custom_css() -> None:
             font-weight: 700;
             margin-bottom: 0.45rem;
         }
-        .step-title { font-weight: 600; color: #0f172a; margin-bottom: 0.25rem; }
-        .step-desc { color: #64748b; font-size: 0.88rem; line-height: 1.5; margin: 0; }
+
+        .step-title {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.25rem;
+        }
+
+        .step-desc {
+            color: var(--text-muted);
+            font-size: 0.88rem;
+            line-height: 1.5;
+            margin: 0;
+        }
+
         .soft-tip {
-            background: #fff7ed;
-            border: 1px solid #fed7aa;
+            background: var(--tip-bg);
+            border: 1px solid var(--tip-border);
             border-radius: 12px;
             padding: 0.85rem 1rem;
-            color: #9a3412;
+            color: var(--tip-text);
             font-size: 0.9rem;
             margin-top: 0.5rem;
-        }
-        div[data-testid="stSidebar"] {
-            background-color: #f8fafc;
-        }
-        div[data-testid="stSidebar"] .block-container {
-            padding-top: 1.25rem;
         }
         </style>
         """,
@@ -671,15 +807,33 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    inject_custom_css()
-    render_hero()
 
     if "result_df" not in st.session_state:
         st.session_state.result_df = None
     if "scale_preset" not in st.session_state:
         st.session_state.scale_preset = "balanced"
+    if "theme_mode" not in st.session_state:
+        st.session_state.theme_mode = "system"
+
+    inject_custom_css()
+    render_hero()
 
     with st.sidebar:
+        st.markdown("##### 显示主题")
+        theme_mode = st.radio(
+            "界面主题",
+            options=list(THEME_OPTIONS.keys()),
+            format_func=lambda x: THEME_OPTIONS[x],
+            index=list(THEME_OPTIONS.keys()).index(st.session_state.theme_mode),
+            horizontal=True,
+            label_visibility="collapsed",
+            help="跟随系统会根据电脑/浏览器的浅色或深色模式自动切换",
+        )
+        st.session_state.theme_mode = theme_mode
+        apply_theme_to_page(theme_mode)
+        st.caption("跟随系统 · 浅色 · 深色")
+        st.divider()
+
         st.markdown("### 设置面板")
         st.caption("把常用配置放这里，主页面专注于输入和查看结果。")
 
