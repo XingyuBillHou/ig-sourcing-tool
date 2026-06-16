@@ -674,7 +674,7 @@ def render_settings_dock_shell(main_renderer) -> None:
     )
 
     if dock_open:
-        dock_col, main_col = st.columns([0.27, 0.73], gap="small")
+        dock_col, main_col = st.columns([0.18, 0.82], gap="small")
         with dock_col:
             st.markdown('<span class="settings-dock-marker"></span>', unsafe_allow_html=True)
             head_left, head_right = st.columns([5, 1])
@@ -730,6 +730,10 @@ def inject_custom_css() -> None:
             --divider: #e2e8f0;
             --link: #4f46e5;
             --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+            --dock-width: 248px;
+            --btn-bg: #e8edf3;
+            --btn-text: #0f172a;
+            --btn-border: #cbd5e1;
         }
 
         @media (prefers-color-scheme: dark) {
@@ -759,6 +763,9 @@ def inject_custom_css() -> None:
                 --divider: #2a3545;
                 --link: #93a4ff;
                 --shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+                --btn-bg: #243044;
+                --btn-text: #f1f5f9;
+                --btn-border: #3d5068;
             }
         }
 
@@ -788,6 +795,10 @@ def inject_custom_css() -> None:
             --divider: #e2e8f0;
             --link: #4f46e5;
             --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+            --dock-width: 248px;
+            --btn-bg: #e8edf3;
+            --btn-text: #0f172a;
+            --btn-border: #cbd5e1;
         }
 
         :root[data-theme="dark"] {
@@ -816,6 +827,42 @@ def inject_custom_css() -> None:
             --divider: #2a3545;
             --link: #93a4ff;
             --shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+            --dock-width: 248px;
+            --btn-bg: #243044;
+            --btn-text: #f1f5f9;
+            --btn-border: #3d5068;
+        }
+
+        .stButton > button[kind="secondary"],
+        [data-testid="stLinkButton"] a,
+        div[data-testid="stRadio"] div[role="radiogroup"] > label,
+        div[data-testid="stSegmentedControl"] button {
+            background-color: var(--btn-bg) !important;
+            color: var(--btn-text) !important;
+            border: 1px solid var(--btn-border) !important;
+        }
+
+        div[data-testid="stRadio"] div[role="radiogroup"] > label p,
+        div[data-testid="stRadio"] div[role="radiogroup"] > label span,
+        div[data-testid="stRadio"] div[role="radiogroup"] > label div,
+        div[data-testid="stSegmentedControl"] button p,
+        div[data-testid="stSegmentedControl"] button span,
+        div[data-testid="stSegmentedControl"] button div {
+            color: inherit !important;
+        }
+
+        div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked),
+        div[data-testid="stSegmentedControl"] button[aria-checked="true"] {
+            background-color: var(--step-accent) !important;
+            color: #ffffff !important;
+            border-color: var(--step-accent) !important;
+        }
+
+        div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) p,
+        div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) span,
+        div[data-testid="stSegmentedControl"] button[aria-checked="true"] p,
+        div[data-testid="stSegmentedControl"] button[aria-checked="true"] span {
+            color: #ffffff !important;
         }
 
         .stApp {
@@ -843,12 +890,13 @@ def inject_custom_css() -> None:
             position: fixed !important;
             left: 0;
             top: 0;
-            width: min(320px, 30vw) !important;
-            min-width: 280px !important;
+            width: var(--dock-width) !important;
+            min-width: var(--dock-width) !important;
+            max-width: var(--dock-width) !important;
             height: 100vh;
             overflow-y: auto;
             overflow-x: hidden;
-            padding: 0.75rem 0.85rem 1.25rem !important;
+            padding: 0.65rem 0.75rem 1.1rem !important;
             background: var(--sidebar-bg) !important;
             border-right: 1px solid var(--border-color) !important;
             box-shadow: var(--shadow);
@@ -866,8 +914,8 @@ def inject_custom_css() -> None:
         }
 
         html[data-dock-open="true"] div[data-testid="column"]:has(.main-content-marker) {
-            margin-left: min(320px, 30vw);
-            width: calc(100% - min(320px, 30vw)) !important;
+            margin-left: var(--dock-width);
+            width: calc(100% - var(--dock-width)) !important;
             max-width: none !important;
             flex: 1 1 auto !important;
         }
@@ -941,8 +989,8 @@ def inject_custom_css() -> None:
         div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stRadio"] label,
         div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stToggle"] label,
         div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stSlider"] label {
-            color: var(--text-secondary) !important;
-            font-size: 0.9rem !important;
+            color: var(--btn-text) !important;
+            font-size: 0.88rem !important;
         }
 
         div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stTextInput"] input {
@@ -952,9 +1000,9 @@ def inject_custom_css() -> None:
         }
 
         div[data-testid="column"]:has(.settings-dock-marker) [data-testid="stLinkButton"] a {
-            background-color: var(--surface-muted) !important;
-            color: var(--text-primary) !important;
-            border: 1px solid var(--border-color) !important;
+            background-color: var(--btn-bg) !important;
+            color: var(--btn-text) !important;
+            border: 1px solid var(--btn-border) !important;
         }
 
         .block-container {
