@@ -548,37 +548,13 @@ def apply_theme_to_page(theme_mode: str) -> None:
     components.html(f"<script>{script}</script>", height=0, width=0)
 
 
-def open_sidebar_panel() -> None:
-    """尝试通过 localStorage 与原生按钮展开侧边栏（Streamlit 各版本行为不一致，仅作辅助）。"""
+def apply_layout_to_page(settings_dock_open: bool) -> None:
+    """标记设置面板展开/收起状态，供布局 CSS 使用。"""
     import streamlit.components.v1 as components
 
+    flag = "true" if settings_dock_open else "false"
     components.html(
-        """
-        <script>
-        (function () {
-            const win = window.parent;
-            const doc = win.document;
-            Object.keys(win.localStorage).forEach((key) => {
-                if (key.startsWith("stSidebarCollapsed")) {
-                    win.localStorage.setItem(key, "false");
-                }
-            });
-            const selectors = [
-                '[data-testid="collapsedControl"]',
-                '[data-testid="stSidebarCollapsedControl"]',
-                'button[data-testid="stSidebarCollapseButton"]',
-                'button[kind="headerNoPadding"]',
-            ];
-            for (const selector of selectors) {
-                const button = doc.querySelector(selector);
-                if (button) {
-                    button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-                    return;
-                }
-            }
-        })();
-        </script>
-        """,
+        f'<script>parent.document.documentElement.setAttribute("data-dock-open", "{flag}");</script>',
         height=0,
         width=0,
     )
@@ -600,21 +576,18 @@ def init_app_settings_state() -> None:
 
 
 def render_app_settings_form() -> tuple[int, int, str]:
-    """完整设置表单（仅渲染一次，避免与侧边栏控件冲突）。"""
-    st.markdown("##### 显示主题")
+    """左侧设置面板内容。"""
+    st.markdown('<p class="dock-section-label">显示主题</p>', unsafe_allow_html=True)
     st.radio(
         "界面主题",
         options=list(THEME_OPTIONS.keys()),
         format_func=lambda x: THEME_OPTIONS[x],
-        horizontal=True,
         key="theme_mode",
         help="跟随系统会根据电脑/浏览器的浅色或深色模式自动切换",
     )
     apply_theme_to_page(st.session_state.theme_mode)
-    st.caption("跟随系统 · 浅色 · 深色")
-    st.divider()
 
-    st.markdown("##### 抓取规模")
+    st.markdown('<p class="dock-section-label">抓取规模</p>', unsafe_allow_html=True)
     st.radio(
         "快速预设",
         options=["save", "balanced", "deep"],
@@ -649,7 +622,7 @@ def render_app_settings_form() -> tuple[int, int, str]:
     else:
         st.session_state.posts_limit = preset_posts
         st.session_state.max_profiles = preset_profiles
-        st.caption(f"当前配置：{preset_posts} 条贴文 · 最多 {preset_profiles} 个主页")
+        st.caption(f"{preset_posts} 条贴文 · 最多 {preset_profiles} 个主页")
 
     estimated_cost = estimate_run_cost_usd(
         st.session_state.posts_limit,
@@ -659,22 +632,23 @@ def render_app_settings_form() -> tuple[int, int, str]:
         st.session_state.posts_limit,
         st.session_state.max_profiles,
     )
-    st.info(
-        f"本次约 **${estimated_cost:.2f}**\n\n"
-        f"Starter 月额度约可跑 **{estimated_runs} 次**"
+    st.markdown(
+        f'<div class="dock-cost-box">本次约 <strong>${estimated_cost:.2f}</strong><br>'
+        f"Starter 月额度约可跑 <strong>{estimated_runs}</strong> 次</div>",
+        unsafe_allow_html=True,
     )
 
-    st.divider()
-    st.markdown("##### Apify 凭证")
+    st.markdown('<p class="dock-section-label">Apify 凭证</p>', unsafe_allow_html=True)
     st.text_input(
         "API Token",
         type="password",
         placeholder="apify_api_xxxxxxxx",
         help="在 Apify 控制台 → Settings → Integrations 中复制",
         key="api_token",
+        label_visibility="collapsed",
     )
-    st.caption("Token 仅用于本次运行，不会保存到本地。")
-    st.link_button("打开 Apify 控制台", "https://console.apify.com/account/integrations")
+    st.caption("Token 仅用于本次运行，不会保存。")
+    st.link_button("打开 Apify 控制台", "https://console.apify.com/account/integrations", use_container_width=True)
 
     return (
         st.session_state.posts_limit,
@@ -683,41 +657,47 @@ def render_app_settings_form() -> tuple[int, int, str]:
     )
 
 
-def render_settings_entry() -> tuple[int, int, str]:
-    """主区域设置入口：Popover 始终可用，不依赖左侧栏是否展开。"""
-    guide_col, settings_col = st.columns([4, 1])
-    with guide_col:
-        st.caption("点击右侧 **⚙️ 设置** 打开主题、Apify Token 与抓取参数。")
-    with settings_col:
-        with st.popover("⚙️ 设置", use_container_width=True):
-            return render_app_settings_form()
-    return (
+def render_settings_dock_shell(main_renderer) -> None:
+    """左侧吸附设置面板 + 主内容区。"""
+    if "settings_dock_open" not in st.session_state:
+        st.session_state.settings_dock_open = True
+
+    dock_open = st.session_state.settings_dock_open
+    inject_custom_css()
+    apply_layout_to_page(dock_open)
+    apply_theme_to_page(st.session_state.theme_mode)
+
+    settings = (
         st.session_state.posts_limit,
         st.session_state.max_profiles,
         st.session_state.api_token.strip(),
     )
 
-
-def render_sidebar_summary() -> None:
-    """侧边栏展示当前配置摘要，并提供展开侧边栏的辅助操作。"""
-    with st.sidebar:
-        st.markdown("### 设置摘要")
-        st.caption("完整设置在主页面右上角 **⚙️ 设置** 中修改。")
-        st.divider()
-        st.markdown("##### 当前配置")
-        st.write(f"**主题：** {THEME_OPTIONS[st.session_state.theme_mode]}")
-        preset_label = {
-            "save": "省额度 · 适合试跑",
-            "balanced": "推荐 · 默认平衡",
-            "deep": "深度挖掘 · 结果更多",
-        }[st.session_state.scale_preset]
-        st.write(f"**抓取预设：** {preset_label}")
-        st.write(f"**贴文 / 主页：** {st.session_state.posts_limit} / {st.session_state.max_profiles}")
-        token_status = "已填写" if st.session_state.api_token.strip() else "未填写"
-        st.write(f"**Apify Token：** {token_status}")
-        st.divider()
-        if st.button("展开左侧栏", use_container_width=True, help="若左侧栏已隐藏，可尝试点此恢复"):
-            open_sidebar_panel()
+    if dock_open:
+        dock_col, main_col = st.columns([0.27, 0.73], gap="small")
+        with dock_col:
+            st.markdown('<span class="settings-dock-marker"></span>', unsafe_allow_html=True)
+            head_left, head_right = st.columns([5, 1])
+            with head_left:
+                st.markdown("##### ⚙️ 设置")
+            with head_right:
+                if st.button("◀", key="dock_close", help="收起设置面板"):
+                    st.session_state.settings_dock_open = False
+                    st.rerun()
+            settings = render_app_settings_form()
+        with main_col:
+            st.markdown('<span class="main-content-marker"></span>', unsafe_allow_html=True)
+            main_renderer(*settings)
+    else:
+        reopen_col, main_col = st.columns([0.035, 0.965], gap="small")
+        with reopen_col:
+            st.markdown('<span class="dock-reopen-marker"></span>', unsafe_allow_html=True)
+            if st.button("⚙️\n设置", key="dock_reopen", help="展开左侧设置面板", use_container_width=True):
+                st.session_state.settings_dock_open = True
+                st.rerun()
+        with main_col:
+            st.markdown('<span class="main-content-marker"></span>', unsafe_allow_html=True)
+            main_renderer(*settings)
 
 
 def inject_custom_css() -> None:
@@ -843,6 +823,14 @@ def inject_custom_css() -> None:
             color: var(--text-primary);
         }
 
+        section[data-testid="stSidebar"],
+        div[data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"],
+        button[data-testid="stSidebarCollapseButton"] {
+            display: none !important;
+        }
+
         [data-testid="stAppViewContainer"] .main {
             background-color: var(--main-bg);
         }
@@ -851,87 +839,119 @@ def inject_custom_css() -> None:
             background: transparent;
         }
 
-        [data-testid="stSidebarCollapseButton"],
-        [data-testid="collapsedControl"],
-        [data-testid="stSidebarCollapsedControl"] {
-            visibility: visible !important;
-            display: flex !important;
-            opacity: 1 !important;
-            z-index: 999999 !important;
-            color: var(--text-primary) !important;
-            background-color: var(--surface) !important;
-            border: 1px solid var(--border-color) !important;
-            border-radius: 10px !important;
-            box-shadow: var(--shadow) !important;
-        }
-
-        [data-testid="stSidebarCollapseButton"] svg,
-        [data-testid="collapsedControl"] svg,
-        [data-testid="stSidebarCollapsedControl"] svg {
-            fill: var(--text-primary) !important;
-            color: var(--text-primary) !important;
-            stroke: var(--text-primary) !important;
-        }
-
-        section[data-testid="stSidebar"],
-        div[data-testid="stSidebar"],
-        section[data-testid="stSidebar"] > div,
-        div[data-testid="stSidebar"] > div,
-        [data-testid="stSidebarContent"] {
-            background-color: var(--sidebar-bg) !important;
-            color: var(--text-secondary) !important;
-        }
-
-        section[data-testid="stSidebar"],
-        div[data-testid="stSidebar"] {
+        div[data-testid="column"]:has(.settings-dock-marker) {
+            position: fixed !important;
+            left: 0;
+            top: 0;
+            width: min(320px, 30vw) !important;
+            min-width: 280px !important;
+            height: 100vh;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 0.75rem 0.85rem 1.25rem !important;
+            background: var(--sidebar-bg) !important;
             border-right: 1px solid var(--border-color) !important;
+            box-shadow: var(--shadow);
+            z-index: 1000;
+            flex: none !important;
         }
 
-        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
-        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
-        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
-        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h4,
-        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h5,
-        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
-        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
-        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
-        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h4,
-        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h5,
-        section[data-testid="stSidebar"] label,
-        section[data-testid="stSidebar"] span,
-        div[data-testid="stSidebar"] label,
-        div[data-testid="stSidebar"] span {
+        div[data-testid="column"]:has(.settings-dock-marker)::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        div[data-testid="column"]:has(.settings-dock-marker)::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 999px;
+        }
+
+        html[data-dock-open="true"] div[data-testid="column"]:has(.main-content-marker) {
+            margin-left: min(320px, 30vw);
+            width: calc(100% - min(320px, 30vw)) !important;
+            max-width: none !important;
+            flex: 1 1 auto !important;
+        }
+
+        html[data-dock-open="false"] div[data-testid="column"]:has(.main-content-marker) {
+            margin-left: 58px;
+            width: calc(100% - 58px) !important;
+            max-width: none !important;
+            flex: 1 1 auto !important;
+        }
+
+        div[data-testid="column"]:has(.dock-reopen-marker) {
+            position: fixed !important;
+            left: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 52px !important;
+            min-width: 52px !important;
+            z-index: 1001;
+            padding: 0 !important;
+            background: transparent !important;
+            border: none !important;
+            flex: none !important;
+        }
+
+        div[data-testid="column"]:has(.dock-reopen-marker) button {
+            min-height: 92px !important;
+            padding: 0.35rem 0.2rem !important;
+            line-height: 1.25 !important;
+            white-space: pre-line !important;
+            border-radius: 0 14px 14px 0 !important;
+            background: var(--surface) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border-color) !important;
+            border-left: none !important;
+            box-shadow: var(--shadow) !important;
+            font-size: 0.82rem !important;
+            font-weight: 600 !important;
+        }
+
+        div[data-testid="column"]:has(.settings-dock-marker) button[kind="secondary"] {
+            min-width: 2rem;
+            padding: 0.15rem 0.35rem !important;
+            border-radius: 8px !important;
+        }
+
+        .dock-section-label {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin: 0.75rem 0 0.35rem;
+        }
+
+        .dock-section-label:first-child {
+            margin-top: 0.15rem;
+        }
+
+        .dock-cost-box {
+            background: var(--surface-muted);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 0.75rem 0.85rem;
+            color: var(--text-secondary);
+            font-size: 0.88rem;
+            line-height: 1.55;
+            margin: 0.35rem 0 0.75rem;
+        }
+
+        div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stRadio"] label,
+        div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stToggle"] label,
+        div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stSlider"] label {
             color: var(--text-secondary) !important;
+            font-size: 0.9rem !important;
         }
 
-        section[data-testid="stSidebar"] .block-container,
-        div[data-testid="stSidebar"] .block-container {
-            padding-top: 1.25rem;
-        }
-
-        section[data-testid="stSidebar"] div[data-testid="stTextInput"] input,
-        div[data-testid="stSidebar"] div[data-testid="stTextInput"] input {
+        div[data-testid="column"]:has(.settings-dock-marker) div[data-testid="stTextInput"] input {
             background-color: var(--input-bg) !important;
             color: var(--input-text) !important;
             border: 1px solid var(--input-border) !important;
         }
 
-        section[data-testid="stSidebar"] div[data-testid="stAlert"],
-        div[data-testid="stSidebar"] div[data-testid="stAlert"] {
-            background-color: var(--surface-muted) !important;
-            color: var(--text-secondary) !important;
-            border: 1px solid var(--border-color) !important;
-        }
-
-        section[data-testid="stSidebar"] div[data-testid="stSlider"] [data-baseweb="slider"] div,
-        div[data-testid="stSidebar"] div[data-testid="stSlider"] [data-baseweb="slider"] div {
-            color: var(--text-muted) !important;
-        }
-
-        section[data-testid="stSidebar"] [data-testid="stLinkButton"] a,
-        div[data-testid="stSidebar"] [data-testid="stLinkButton"] a {
+        div[data-testid="column"]:has(.settings-dock-marker) [data-testid="stLinkButton"] a {
             background-color: var(--surface-muted) !important;
             color: var(--text-primary) !important;
             border: 1px solid var(--border-color) !important;
@@ -1042,21 +1062,6 @@ def inject_custom_css() -> None:
 
         [data-testid="stLinkButton"] a {
             border-radius: 10px !important;
-        }
-
-        div[data-testid="stPopover"] > button {
-            border: 1px solid var(--border-color) !important;
-            background-color: var(--surface) !important;
-            color: var(--text-primary) !important;
-            border-radius: 10px !important;
-            box-shadow: var(--shadow) !important;
-        }
-
-        div[data-testid="stPopoverBody"] {
-            background-color: var(--surface) !important;
-            border: 1px solid var(--border-color) !important;
-            border-radius: 12px !important;
-            box-shadow: var(--shadow) !important;
         }
 
         .hero-box {
@@ -1209,23 +1214,8 @@ def apply_scale_preset(preset: str) -> tuple[int, int]:
     return presets[preset]
 
 
-def main():
-    st.set_page_config(
-        page_title="IG Sourcing",
-        page_icon=".streamlit/favicon.png",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    if "result_df" not in st.session_state:
-        st.session_state.result_df = None
-    init_app_settings_state()
-
-    inject_custom_css()
-    apply_theme_to_page(st.session_state.theme_mode)
+def render_main_content(posts_limit: int, max_profiles: int, api_token: str) -> None:
     render_hero()
-    posts_limit, max_profiles, api_token = render_settings_entry()
-    render_sidebar_summary()
 
     st.markdown("#### 开始一次检索")
     with st.form("sourcing_form", clear_on_submit=False):
@@ -1259,7 +1249,7 @@ def main():
             st.error("请先输入 Instagram 主页链接。")
             st.stop()
         if not api_token.strip():
-            st.error("请先在右上角 ⚙️ 设置 中输入 Apify API Token。")
+            st.error("请先在左侧 ⚙️ 设置 面板中输入 Apify API Token。")
             st.stop()
 
         try:
@@ -1406,6 +1396,20 @@ def main():
             )
         with col2:
             st.caption("导出文件使用 UTF-8 编码，Excel 可直接打开，中文不会乱码。")
+
+
+def main():
+    st.set_page_config(
+        page_title="IG Sourcing",
+        page_icon=".streamlit/favicon.png",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+
+    if "result_df" not in st.session_state:
+        st.session_state.result_df = None
+    init_app_settings_state()
+    render_settings_dock_shell(render_main_content)
 
 
 if __name__ == "__main__":
