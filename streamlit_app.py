@@ -731,9 +731,9 @@ def inject_custom_css() -> None:
             --link: #4f46e5;
             --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
             --dock-width: 248px;
-            --btn-bg: #e8edf3;
-            --btn-text: #0f172a;
-            --btn-border: #cbd5e1;
+            --btn-bg: #d9e2ec;
+            --btn-text: #111827;
+            --btn-border: #94a3b8;
         }
 
         @media (prefers-color-scheme: dark) {
@@ -796,9 +796,9 @@ def inject_custom_css() -> None:
             --link: #4f46e5;
             --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
             --dock-width: 248px;
-            --btn-bg: #e8edf3;
-            --btn-text: #0f172a;
-            --btn-border: #cbd5e1;
+            --btn-bg: #d9e2ec;
+            --btn-text: #111827;
+            --btn-border: #94a3b8;
         }
 
         :root[data-theme="dark"] {
@@ -833,36 +833,86 @@ def inject_custom_css() -> None:
             --btn-border: #3d5068;
         }
 
-        .stButton > button[kind="secondary"],
-        [data-testid="stLinkButton"] a,
-        div[data-testid="stRadio"] div[role="radiogroup"] > label,
-        div[data-testid="stSegmentedControl"] button {
+        .stApp button[data-testid="baseButton-primary"],
+        .stApp .stButton > button[kind="primary"],
+        .stApp [data-testid="stBaseButton-primary"] button,
+        .stApp [data-testid="stBaseButton-primary"] > button {
+            background-color: var(--step-accent) !important;
+            color: #ffffff !important;
+            border: 1px solid var(--step-accent) !important;
+        }
+
+        .stApp button[data-testid="baseButton-primary"] p,
+        .stApp button[data-testid="baseButton-primary"] span,
+        .stApp button[data-testid="baseButton-primary"] div,
+        .stApp .stButton > button[kind="primary"] p,
+        .stApp .stButton > button[kind="primary"] span,
+        .stApp .stButton > button[kind="primary"] div {
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }
+
+        .stApp button[data-testid="baseButton-secondary"],
+        .stApp button[data-testid="baseButton-secondaryFormSubmit"],
+        .stApp .stButton > button[kind="secondary"],
+        .stApp [data-testid="stBaseButton-secondary"] button,
+        .stApp [data-testid="stBaseButton-secondary"] > button,
+        .stApp [data-testid="stDownloadButton"] button,
+        .stApp [data-testid="stLinkButton"] a,
+        .stApp [data-testid="stLinkButton"] button,
+        .stApp div[data-baseweb="button"] > button:not([data-testid="baseButton-primary"]),
+        .stApp div[data-testid="stSegmentedControl"] button,
+        .stApp div[data-testid="stSegmentedControlSingleLabel"] button {
+            background-color: var(--btn-bg) !important;
+            color: var(--btn-text) !important;
+            border: 1px solid var(--btn-border) !important;
+            -webkit-text-fill-color: var(--btn-text) !important;
+        }
+
+        .stApp button[data-testid="baseButton-secondary"] *,
+        .stApp button[data-testid="baseButton-secondaryFormSubmit"] *,
+        .stApp .stButton > button[kind="secondary"] *,
+        .stApp [data-testid="stBaseButton-secondary"] *,
+        .stApp [data-testid="stDownloadButton"] button *,
+        .stApp [data-testid="stLinkButton"] a *,
+        .stApp div[data-testid="stSegmentedControl"] button *,
+        .stApp div[data-testid="stSegmentedControlSingleLabel"] button * {
+            color: var(--btn-text) !important;
+            -webkit-text-fill-color: var(--btn-text) !important;
+        }
+
+        .stApp div[data-testid="stRadio"] [role="radiogroup"] > label,
+        .stApp div[data-testid="stRadio"] [data-baseweb="radio"] label,
+        .stApp [data-baseweb="radio"] label {
             background-color: var(--btn-bg) !important;
             color: var(--btn-text) !important;
             border: 1px solid var(--btn-border) !important;
         }
 
-        div[data-testid="stRadio"] div[role="radiogroup"] > label p,
-        div[data-testid="stRadio"] div[role="radiogroup"] > label span,
-        div[data-testid="stRadio"] div[role="radiogroup"] > label div,
-        div[data-testid="stSegmentedControl"] button p,
-        div[data-testid="stSegmentedControl"] button span,
-        div[data-testid="stSegmentedControl"] button div {
-            color: inherit !important;
+        .stApp div[data-testid="stRadio"] [role="radiogroup"] > label *,
+        .stApp div[data-testid="stRadio"] [data-baseweb="radio"] label *,
+        .stApp [data-baseweb="radio"] label * {
+            color: var(--btn-text) !important;
+            -webkit-text-fill-color: var(--btn-text) !important;
         }
 
-        div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked),
-        div[data-testid="stSegmentedControl"] button[aria-checked="true"] {
+        .stApp div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked),
+        .stApp div[data-testid="stRadio"] [data-baseweb="radio"] label:has(input:checked),
+        .stApp div[data-testid="stSegmentedControl"] button[aria-checked="true"],
+        .stApp div[data-testid="stSegmentedControlSingleLabel"] button[aria-checked="true"],
+        .stApp div[data-testid="stSegmentedControl"] button[data-checked="true"] {
             background-color: var(--step-accent) !important;
             color: #ffffff !important;
             border-color: var(--step-accent) !important;
+            -webkit-text-fill-color: #ffffff !important;
         }
 
-        div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) p,
-        div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) span,
-        div[data-testid="stSegmentedControl"] button[aria-checked="true"] p,
-        div[data-testid="stSegmentedControl"] button[aria-checked="true"] span {
+        .stApp div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) *,
+        .stApp div[data-testid="stRadio"] [data-baseweb="radio"] label:has(input:checked) *,
+        .stApp div[data-testid="stSegmentedControl"] button[aria-checked="true"] *,
+        .stApp div[data-testid="stSegmentedControlSingleLabel"] button[aria-checked="true"] * {
             color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
         }
 
         .stApp {
@@ -947,13 +997,14 @@ def inject_custom_css() -> None:
             line-height: 1.25 !important;
             white-space: pre-line !important;
             border-radius: 0 14px 14px 0 !important;
-            background: var(--surface) !important;
-            color: var(--text-primary) !important;
-            border: 1px solid var(--border-color) !important;
+            background: var(--btn-bg) !important;
+            color: var(--btn-text) !important;
+            border: 1px solid var(--btn-border) !important;
             border-left: none !important;
             box-shadow: var(--shadow) !important;
             font-size: 0.82rem !important;
             font-weight: 600 !important;
+            -webkit-text-fill-color: var(--btn-text) !important;
         }
 
         div[data-testid="column"]:has(.settings-dock-marker) button[kind="secondary"] {
