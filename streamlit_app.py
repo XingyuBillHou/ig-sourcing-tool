@@ -549,23 +549,30 @@ def apply_theme_to_page(theme_mode: str) -> None:
 
 
 def open_sidebar_panel() -> None:
-    """侧边栏被收起时，通过点击 Streamlit 原生按钮重新展开。"""
+    """尝试通过 localStorage 与原生按钮展开侧边栏（Streamlit 各版本行为不一致，仅作辅助）。"""
     import streamlit.components.v1 as components
 
     components.html(
         """
         <script>
         (function () {
-            const doc = window.parent.document;
+            const win = window.parent;
+            const doc = win.document;
+            Object.keys(win.localStorage).forEach((key) => {
+                if (key.startsWith("stSidebarCollapsed")) {
+                    win.localStorage.setItem(key, "false");
+                }
+            });
             const selectors = [
-                '[data-testid="stSidebarCollapseButton"]',
                 '[data-testid="collapsedControl"]',
                 '[data-testid="stSidebarCollapsedControl"]',
+                'button[data-testid="stSidebarCollapseButton"]',
+                'button[kind="headerNoPadding"]',
             ];
             for (const selector of selectors) {
                 const button = doc.querySelector(selector);
                 if (button) {
-                    button.click();
+                    button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
                     return;
                 }
             }
@@ -577,15 +584,140 @@ def open_sidebar_panel() -> None:
     )
 
 
-def render_settings_toolbar() -> None:
-    """主区域提供设置入口，避免侧边栏收起后无法找回。"""
-    tool_col, btn_col = st.columns([4, 1])
-    with tool_col:
-        st.caption("主题、Apify Token 与抓取参数在左侧设置面板。")
-    with btn_col:
-        if st.button("⚙️ 打开设置", use_container_width=True, help="重新展开左侧设置面板"):
+def init_app_settings_state() -> None:
+    if "scale_preset" not in st.session_state:
+        st.session_state.scale_preset = "balanced"
+    if "theme_mode" not in st.session_state:
+        st.session_state.theme_mode = "system"
+    if "use_custom_scale" not in st.session_state:
+        st.session_state.use_custom_scale = False
+    if "posts_limit" not in st.session_state:
+        st.session_state.posts_limit = DEFAULT_POSTS_LIMIT
+    if "max_profiles" not in st.session_state:
+        st.session_state.max_profiles = DEFAULT_MAX_PROFILES
+    if "api_token" not in st.session_state:
+        st.session_state.api_token = ""
+
+
+def render_app_settings_form() -> tuple[int, int, str]:
+    """完整设置表单（仅渲染一次，避免与侧边栏控件冲突）。"""
+    st.markdown("##### 显示主题")
+    st.radio(
+        "界面主题",
+        options=list(THEME_OPTIONS.keys()),
+        format_func=lambda x: THEME_OPTIONS[x],
+        horizontal=True,
+        key="theme_mode",
+        help="跟随系统会根据电脑/浏览器的浅色或深色模式自动切换",
+    )
+    apply_theme_to_page(st.session_state.theme_mode)
+    st.caption("跟随系统 · 浅色 · 深色")
+    st.divider()
+
+    st.markdown("##### 抓取规模")
+    st.radio(
+        "快速预设",
+        options=["save", "balanced", "deep"],
+        format_func=lambda x: {
+            "save": "省额度 · 适合试跑",
+            "balanced": "推荐 · 默认平衡",
+            "deep": "深度挖掘 · 结果更多",
+        }[x],
+        key="scale_preset",
+        help="Starter 计划建议日常使用「推荐」预设",
+    )
+    preset_posts, preset_profiles = apply_scale_preset(st.session_state.scale_preset)
+    st.toggle("自定义抓取数量", key="use_custom_scale")
+
+    if st.session_state.use_custom_scale:
+        st.slider(
+            "扫描贴文数量",
+            min_value=50,
+            max_value=STARTER_MAX_POSTS_LIMIT,
+            value=st.session_state.posts_limit,
+            step=25,
+            key="posts_limit",
+        )
+        st.slider(
+            "主页抓取数量",
+            min_value=20,
+            max_value=STARTER_MAX_PROFILES,
+            value=st.session_state.max_profiles,
+            step=5,
+            key="max_profiles",
+        )
+    else:
+        st.session_state.posts_limit = preset_posts
+        st.session_state.max_profiles = preset_profiles
+        st.caption(f"当前配置：{preset_posts} 条贴文 · 最多 {preset_profiles} 个主页")
+
+    estimated_cost = estimate_run_cost_usd(
+        st.session_state.posts_limit,
+        st.session_state.max_profiles,
+    )
+    estimated_runs = estimate_monthly_runs(
+        st.session_state.posts_limit,
+        st.session_state.max_profiles,
+    )
+    st.info(
+        f"本次约 **${estimated_cost:.2f}**\n\n"
+        f"Starter 月额度约可跑 **{estimated_runs} 次**"
+    )
+
+    st.divider()
+    st.markdown("##### Apify 凭证")
+    st.text_input(
+        "API Token",
+        type="password",
+        placeholder="apify_api_xxxxxxxx",
+        help="在 Apify 控制台 → Settings → Integrations 中复制",
+        key="api_token",
+    )
+    st.caption("Token 仅用于本次运行，不会保存到本地。")
+    st.link_button("打开 Apify 控制台", "https://console.apify.com/account/integrations")
+
+    return (
+        st.session_state.posts_limit,
+        st.session_state.max_profiles,
+        st.session_state.api_token.strip(),
+    )
+
+
+def render_settings_entry() -> tuple[int, int, str]:
+    """主区域设置入口：Popover 始终可用，不依赖左侧栏是否展开。"""
+    guide_col, settings_col = st.columns([4, 1])
+    with guide_col:
+        st.caption("点击右侧 **⚙️ 设置** 打开主题、Apify Token 与抓取参数。")
+    with settings_col:
+        with st.popover("⚙️ 设置", use_container_width=True):
+            return render_app_settings_form()
+    return (
+        st.session_state.posts_limit,
+        st.session_state.max_profiles,
+        st.session_state.api_token.strip(),
+    )
+
+
+def render_sidebar_summary() -> None:
+    """侧边栏展示当前配置摘要，并提供展开侧边栏的辅助操作。"""
+    with st.sidebar:
+        st.markdown("### 设置摘要")
+        st.caption("完整设置在主页面右上角 **⚙️ 设置** 中修改。")
+        st.divider()
+        st.markdown("##### 当前配置")
+        st.write(f"**主题：** {THEME_OPTIONS[st.session_state.theme_mode]}")
+        preset_label = {
+            "save": "省额度 · 适合试跑",
+            "balanced": "推荐 · 默认平衡",
+            "deep": "深度挖掘 · 结果更多",
+        }[st.session_state.scale_preset]
+        st.write(f"**抓取预设：** {preset_label}")
+        st.write(f"**贴文 / 主页：** {st.session_state.posts_limit} / {st.session_state.max_profiles}")
+        token_status = "已填写" if st.session_state.api_token.strip() else "未填写"
+        st.write(f"**Apify Token：** {token_status}")
+        st.divider()
+        if st.button("展开左侧栏", use_container_width=True, help="若左侧栏已隐藏，可尝试点此恢复"):
             open_sidebar_panel()
-            st.toast("正在展开左侧设置面板", icon="⚙️")
 
 
 def inject_custom_css() -> None:
@@ -912,6 +1044,21 @@ def inject_custom_css() -> None:
             border-radius: 10px !important;
         }
 
+        div[data-testid="stPopover"] > button {
+            border: 1px solid var(--border-color) !important;
+            background-color: var(--surface) !important;
+            color: var(--text-primary) !important;
+            border-radius: 10px !important;
+            box-shadow: var(--shadow) !important;
+        }
+
+        div[data-testid="stPopoverBody"] {
+            background-color: var(--surface) !important;
+            border: 1px solid var(--border-color) !important;
+            border-radius: 12px !important;
+            box-shadow: var(--shadow) !important;
+        }
+
         .hero-box {
             background: var(--hero-bg);
             border: 1px solid var(--border-color);
@@ -1072,88 +1219,13 @@ def main():
 
     if "result_df" not in st.session_state:
         st.session_state.result_df = None
-    if "scale_preset" not in st.session_state:
-        st.session_state.scale_preset = "balanced"
-    if "theme_mode" not in st.session_state:
-        st.session_state.theme_mode = "system"
+    init_app_settings_state()
 
     inject_custom_css()
     apply_theme_to_page(st.session_state.theme_mode)
     render_hero()
-    render_settings_toolbar()
-
-    with st.sidebar:
-        st.markdown("##### 显示主题")
-        theme_mode = st.radio(
-            "界面主题",
-            options=list(THEME_OPTIONS.keys()),
-            format_func=lambda x: THEME_OPTIONS[x],
-            index=list(THEME_OPTIONS.keys()).index(st.session_state.theme_mode),
-            horizontal=True,
-            label_visibility="collapsed",
-            help="跟随系统会根据电脑/浏览器的浅色或深色模式自动切换",
-        )
-        st.session_state.theme_mode = theme_mode
-        apply_theme_to_page(theme_mode)
-        st.caption("跟随系统 · 浅色 · 深色")
-        st.divider()
-
-        st.markdown("### 设置面板")
-        st.caption("把常用配置放这里，主页面专注于输入和查看结果。")
-
-        st.markdown("##### 抓取规模")
-        preset = st.radio(
-            "快速预设",
-            options=["save", "balanced", "deep"],
-            format_func=lambda x: {
-                "save": "省额度 · 适合试跑",
-                "balanced": "推荐 · 默认平衡",
-                "deep": "深度挖掘 · 结果更多",
-            }[x],
-            index=["save", "balanced", "deep"].index(st.session_state.scale_preset),
-            help="Starter 计划建议日常使用「推荐」预设",
-        )
-        st.session_state.scale_preset = preset
-        preset_posts, preset_profiles = apply_scale_preset(preset)
-        use_custom_scale = st.toggle("自定义抓取数量", value=False)
-
-        if use_custom_scale:
-            posts_limit = st.slider(
-                "扫描贴文数量",
-                min_value=50,
-                max_value=STARTER_MAX_POSTS_LIMIT,
-                value=preset_posts,
-                step=25,
-            )
-            max_profiles = st.slider(
-                "主页抓取数量",
-                min_value=20,
-                max_value=STARTER_MAX_PROFILES,
-                value=preset_profiles,
-                step=5,
-            )
-        else:
-            posts_limit, max_profiles = preset_posts, preset_profiles
-            st.caption(f"当前配置：{posts_limit} 条贴文 · 最多 {max_profiles} 个主页")
-
-        estimated_cost = estimate_run_cost_usd(posts_limit, max_profiles)
-        estimated_runs = estimate_monthly_runs(posts_limit, max_profiles)
-        st.info(
-            f"本次约 **${estimated_cost:.2f}**\n\n"
-            f"Starter 月额度约可跑 **{estimated_runs} 次**"
-        )
-
-        st.divider()
-        st.markdown("##### Apify 凭证")
-        api_token = st.text_input(
-            "API Token",
-            type="password",
-            placeholder="apify_api_xxxxxxxx",
-            help="在 Apify 控制台 → Settings → Integrations 中复制",
-            label_visibility="collapsed",
-        )
-        st.caption("Token 仅用于本次运行，不会保存到本地。")
-        st.link_button("打开 Apify 控制台", "https://console.apify.com/account/integrations")
+    posts_limit, max_profiles, api_token = render_settings_entry()
+    render_sidebar_summary()
 
     st.markdown("#### 开始一次检索")
     with st.form("sourcing_form", clear_on_submit=False):
@@ -1187,7 +1259,7 @@ def main():
             st.error("请先输入 Instagram 主页链接。")
             st.stop()
         if not api_token.strip():
-            st.error("请先在左侧设置面板输入 Apify API Token。")
+            st.error("请先在右上角 ⚙️ 设置 中输入 Apify API Token。")
             st.stop()
 
         try:
