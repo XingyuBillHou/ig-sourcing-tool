@@ -548,6 +548,46 @@ def apply_theme_to_page(theme_mode: str) -> None:
     components.html(f"<script>{script}</script>", height=0, width=0)
 
 
+def open_sidebar_panel() -> None:
+    """侧边栏被收起时，通过点击 Streamlit 原生按钮重新展开。"""
+    import streamlit.components.v1 as components
+
+    components.html(
+        """
+        <script>
+        (function () {
+            const doc = window.parent.document;
+            const selectors = [
+                '[data-testid="stSidebarCollapseButton"]',
+                '[data-testid="collapsedControl"]',
+                '[data-testid="stSidebarCollapsedControl"]',
+            ];
+            for (const selector of selectors) {
+                const button = doc.querySelector(selector);
+                if (button) {
+                    button.click();
+                    return;
+                }
+            }
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def render_settings_toolbar() -> None:
+    """主区域提供设置入口，避免侧边栏收起后无法找回。"""
+    tool_col, btn_col = st.columns([4, 1])
+    with tool_col:
+        st.caption("主题、Apify Token 与抓取参数在左侧设置面板。")
+    with btn_col:
+        if st.button("⚙️ 打开设置", use_container_width=True, help="重新展开左侧设置面板"):
+            open_sidebar_panel()
+            st.toast("正在展开左侧设置面板", icon="⚙️")
+
+
 def inject_custom_css() -> None:
     st.markdown(
         """
@@ -679,6 +719,92 @@ def inject_custom_css() -> None:
             background: transparent;
         }
 
+        [data-testid="stSidebarCollapseButton"],
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] {
+            visibility: visible !important;
+            display: flex !important;
+            opacity: 1 !important;
+            z-index: 999999 !important;
+            color: var(--text-primary) !important;
+            background-color: var(--surface) !important;
+            border: 1px solid var(--border-color) !important;
+            border-radius: 10px !important;
+            box-shadow: var(--shadow) !important;
+        }
+
+        [data-testid="stSidebarCollapseButton"] svg,
+        [data-testid="collapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg {
+            fill: var(--text-primary) !important;
+            color: var(--text-primary) !important;
+            stroke: var(--text-primary) !important;
+        }
+
+        section[data-testid="stSidebar"],
+        div[data-testid="stSidebar"],
+        section[data-testid="stSidebar"] > div,
+        div[data-testid="stSidebar"] > div,
+        [data-testid="stSidebarContent"] {
+            background-color: var(--sidebar-bg) !important;
+            color: var(--text-secondary) !important;
+        }
+
+        section[data-testid="stSidebar"],
+        div[data-testid="stSidebar"] {
+            border-right: 1px solid var(--border-color) !important;
+        }
+
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h4,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h5,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h4,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h5,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] span,
+        div[data-testid="stSidebar"] label,
+        div[data-testid="stSidebar"] span {
+            color: var(--text-secondary) !important;
+        }
+
+        section[data-testid="stSidebar"] .block-container,
+        div[data-testid="stSidebar"] .block-container {
+            padding-top: 1.25rem;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stTextInput"] input,
+        div[data-testid="stSidebar"] div[data-testid="stTextInput"] input {
+            background-color: var(--input-bg) !important;
+            color: var(--input-text) !important;
+            border: 1px solid var(--input-border) !important;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stAlert"],
+        div[data-testid="stSidebar"] div[data-testid="stAlert"] {
+            background-color: var(--surface-muted) !important;
+            color: var(--text-secondary) !important;
+            border: 1px solid var(--border-color) !important;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stSlider"] [data-baseweb="slider"] div,
+        div[data-testid="stSidebar"] div[data-testid="stSlider"] [data-baseweb="slider"] div {
+            color: var(--text-muted) !important;
+        }
+
+        section[data-testid="stSidebar"] [data-testid="stLinkButton"] a,
+        div[data-testid="stSidebar"] [data-testid="stLinkButton"] a {
+            background-color: var(--surface-muted) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border-color) !important;
+        }
+
         .block-container {
             padding-top: 1.5rem;
             padding-bottom: 2rem;
@@ -698,21 +824,6 @@ def inject_custom_css() -> None:
         [data-testid="stCaptionContainer"] p,
         [data-testid="stCaptionContainer"] small {
             color: var(--text-muted) !important;
-        }
-
-        div[data-testid="stSidebar"] {
-            background-color: var(--sidebar-bg);
-            border-right: 1px solid var(--border-color);
-        }
-
-        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-        div[data-testid="stSidebar"] label,
-        div[data-testid="stSidebar"] span {
-            color: var(--text-secondary);
-        }
-
-        div[data-testid="stSidebar"] .block-container {
-            padding-top: 1.25rem;
         }
 
         hr {
@@ -967,7 +1078,9 @@ def main():
         st.session_state.theme_mode = "system"
 
     inject_custom_css()
+    apply_theme_to_page(st.session_state.theme_mode)
     render_hero()
+    render_settings_toolbar()
 
     with st.sidebar:
         st.markdown("##### 显示主题")
