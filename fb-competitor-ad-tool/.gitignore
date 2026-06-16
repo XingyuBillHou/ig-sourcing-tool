@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.streamlit/secrets.toml
+temp_videos/
+launch.log

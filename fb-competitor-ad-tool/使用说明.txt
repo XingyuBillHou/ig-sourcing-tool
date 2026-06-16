@@ -1,0 +1,43 @@
+FB 竞品广告拆解工具 - 使用说明
+================================
+
+【功能简介】
+输入竞品 Facebook Page Name，自动抓取广告库中投放最久的 Top 3 视频广告，
+并用 Google Gemini 生成 Hook 拆解、卖点逻辑与逐秒分镜脚本。
+
+【Mac 用户】
+1. 解压本文件夹
+2. 终端执行：bash start.sh
+   或双击 start.command（若被拦截，请右键 → 打开）
+3. 浏览器自动打开 http://localhost:8501
+
+【Windows 用户】
+1. 解压本文件夹
+2. 双击 start.bat
+3. 浏览器自动打开 http://localhost:8501
+
+【使用前准备】
+1. Apify API Token
+   - 注册 https://apify.com 并创建 Token
+   - 用于抓取 Facebook 广告库数据
+2. Google Gemini API Key
+   - 在 Google AI Studio 申请
+   - 用于视频 AI 拆解
+
+【使用步骤】
+1. 在左侧侧边栏填入 Apify Token 和 Gemini API Key
+   （可选：复制 .streamlit/secrets.toml.example 为 secrets.toml 预填密钥）
+2. 输入竞品 Facebook Page Name（例如：Nuage Wear）
+3. 点击「一键获取并拆解 Top 3 爆款」
+4. 等待抓取、下载与分析完成（通常需数分钟）
+5. 在 Tab 中查看视频预览与 AI 拆解报告
+
+【启动失败怎么办】
+- 查看同目录下的 launch.log
+- 确认已安装 Python 3.10+
+- 确认网络可访问 Apify 与 Google API
+
+【注意】
+- API Token 请勿发到公开群聊
+- 关闭启动窗口 = 停止程序
+- 筛选逻辑按广告开始投放日期排序，越早开始越优先（作为爆款代理指标）
