@@ -5,6 +5,8 @@ base = "light"
 headless = true
 enableCORS = false
 enableXsrfProtection = true
+# 局域网/服务器部署时由 start-lan.sh / Docker 传入 --server.address=0.0.0.0
+maxUploadSize = 500
 
 [browser]
 gatherUsageStats = false

@@ -1,0 +1,4 @@
+# 由 deploy-cloud.sh 自动生成；默认占位配置
+:80 {
+    reverse_proxy app:8501
+}

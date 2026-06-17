@@ -1,0 +1,15 @@
+services:
+  fb-ad-tool:
+    build: .
+    container_name: fb-competitor-ad-tool
+    ports:
+      - "8501:8501"
+    volumes:
+      # 密钥（复制 secrets.toml.example 为 secrets.toml 后填入）
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+      # 导出包与临时视频持久化
+      - ./exports:/app/exports
+      - ./temp_videos:/app/temp_videos
+    environment:
+      TZ: Asia/Shanghai
+    restart: unless-stopped

@@ -2,8 +2,11 @@
 __pycache__/
 *.pyc
 .env
+.env.cloud
 .venv/
 venv/
 .streamlit/secrets.toml
+.streamlit/credentials.toml
 temp_videos/
+exports/
 launch.log

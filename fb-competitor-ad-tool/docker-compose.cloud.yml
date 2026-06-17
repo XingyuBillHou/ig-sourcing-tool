@@ -1,0 +1,39 @@
+services:
+  app:
+    build: .
+    container_name: fb-ad-tool-app
+    expose:
+      - "8501"
+    env_file:
+      - .env.cloud
+    volumes:
+      - fb-ad-exports:/app/exports
+      - fb-ad-temp:/app/temp_videos
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: fb-ad-tool-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  fb-ad-exports:
+  fb-ad-temp:
+  caddy-data:
+  caddy-config:

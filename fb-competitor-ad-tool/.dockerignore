@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+temp_videos/*
+exports/*
+launch.log
+*.zip
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+ad-analysis-tool
+ig-sourcing-tool
