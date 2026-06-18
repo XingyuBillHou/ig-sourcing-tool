@@ -48,7 +48,7 @@ TOP_N = 3
 FETCH_LOOKBACK_DAYS = 7
 MAX_VIDEO_DURATION_SEC = 60  # 超过 1 分钟的视频剔除
 FETCH_CANDIDATE_POOL_LIMIT = 200  # 单次抓取候选池（用于验证后凑满 Top 3）
-MAX_FETCH_ROUNDS = 2  # 候选不足时追加抓取轮次（提高 resultsLimit）
+MAX_FETCH_ROUNDS = 3  # 候选不足时追加抓取轮次（提高 resultsLimit / 放宽搜索模式）
 RELEVANCE_CLIP_SECONDS = 15  # Gemini 判定视频与关键词相关性时分析前 N 秒
 POLL_INTERVAL_SEC = 3
 RESULTS_LIMIT = FETCH_CANDIDATE_POOL_LIMIT
@@ -127,16 +127,17 @@ def build_ad_library_url(
     search_keyword: str,
     country: str = "ALL",
     lookback_days: int = FETCH_LOOKBACK_DAYS,
+    search_type: Optional[str] = None,
 ) -> str:
     """构建 Meta Ad Library 全库关键词 + 仅视频 + 近 N 天投放 搜索 URL。"""
     q = search_keyword.strip()
     today = datetime.now().date()
     min_date = today - timedelta(days=lookback_days)
-    # 多词/中文短语用精确匹配，减少无关结果
-    if re.search(r"\s", q) or re.search(r"[\u4e00-\u9fff]{2,}", q):
-        search_type = "keyword_exact_phrase"
-    else:
-        search_type = "keyword_unordered"
+    if search_type is None:
+        if re.search(r"\s", q) or re.search(r"[\u4e00-\u9fff]{2,}", q):
+            search_type = "keyword_exact_phrase"
+        else:
+            search_type = "keyword_unordered"
     return (
         "https://www.facebook.com/ads/library/"
         f"?active_status=active"
@@ -191,10 +192,11 @@ def fetch_fb_ads(
     country: str = "ALL",
     *,
     results_limit: int = RESULTS_LIMIT,
+    search_type: Optional[str] = None,
 ) -> list:
     """从 Meta Ad Library 全库按关键词抓取视频广告。"""
     client = ApifyClient(apify_token)
-    ad_library_url = build_ad_library_url(search_keyword, country)
+    ad_library_url = build_ad_library_url(search_keyword, country, search_type=search_type)
 
     run_input = {
         "startUrls": [{"url": ad_library_url}],
@@ -541,16 +543,22 @@ def rank_video_ad_candidates(
     lookback_days: int = FETCH_LOOKBACK_DAYS,
     *,
     exclude_ad_ids: Optional[set] = None,
+    require_keyword_in_text: bool = False,
 ) -> tuple[list, dict]:
     """
     从 Apify 结果中筛出候选视频广告并排序（不截断 top_n）：
-    含视频 · 近 N 天 · 严格关键词 · 非 AI 生成
+    含视频 · 近 N 天 · 非 AI 生成
+    关键词相关性：默认信任 Meta 搜索 URL（require_keyword_in_text=False），
+    由后续 Gemini 看视频内容再验证。
     """
     exclude_ad_ids = exclude_ad_ids or set()
     all_video_ads = []
     ai_filtered = 0
     keyword_rejected = 0
     excluded_seen = 0
+    no_video = 0
+    no_start_date = 0
+    outside_lookback = 0
 
     for item in items:
         ad_id = _extract_ad_archive_id(item)
@@ -562,14 +570,19 @@ def rank_video_ad_candidates(
             continue
 
         video_url = _extract_video_url(item)
+        if not video_url:
+            no_video += 1
+            continue
         start_date = _extract_start_date(item)
-        if not (video_url and start_date):
+        if not start_date:
+            no_start_date += 1
             continue
         if not _is_ad_started_within_lookback(item, lookback_days):
+            outside_lookback += 1
             continue
 
         kw = (search_keyword or "").strip()
-        if kw and not _ad_matches_keyword(item, kw):
+        if require_keyword_in_text and kw and not _ad_matches_keyword(item, kw):
             keyword_rejected += 1
             continue
 
@@ -591,10 +604,13 @@ def rank_video_ad_candidates(
         "lookback_days": lookback_days,
         "keyword": (search_keyword or "").strip(),
         "keyword_matched": len(all_video_ads),
-        "match_mode": "strict",
+        "match_mode": "meta_search" if not require_keyword_in_text else "strict",
         "ai_filtered": ai_filtered,
         "keyword_rejected": keyword_rejected,
         "excluded_seen": excluded_seen,
+        "no_video": no_video,
+        "no_start_date": no_start_date,
+        "outside_lookback": outside_lookback,
         "with_impression_data": sum(1 for ad in all_video_ads if ad["impression_score"] >= 0),
         "sort_by": "impression_desc",
     }
@@ -830,6 +846,27 @@ def _safe_remove_file(path: str) -> None:
             pass
 
 
+def _format_fetch_failure_diagnosis(stats: dict) -> str:
+    """生成检索失败时的详细诊断文案。"""
+    lines = [
+        f"Apify 共返回 {stats.get('total_raw_items', stats.get('total_items', 0))} 条广告",
+        f"候选池可用 {stats.get('keyword_matched', 0)} 条（近 {stats.get('lookback_days', FETCH_LOOKBACK_DAYS)} 天 · 含视频）",
+        f"已尝试下载验证 {stats.get('candidates_tried', 0)} 条",
+        f"剔除 AI {stats.get('ai_filtered', 0)} · 超 {MAX_VIDEO_DURATION_SEC}s {stats.get('duration_filtered', 0)} · "
+        f"内容不相关 {stats.get('relevance_rejected', 0)} · 下载失败 {stats.get('download_failed', 0)} · "
+        f"Gemini 校验失败 {stats.get('gemini_check_failed', 0)}",
+    ]
+    if stats.get("outside_lookback") or stats.get("no_video") or stats.get("no_start_date"):
+        lines.append(
+            f"预处理排除：无视频 {stats.get('no_video', 0)} · "
+            f"无开始日期 {stats.get('no_start_date', 0)} · "
+            f"超出 {stats.get('lookback_days', FETCH_LOOKBACK_DAYS)} 天 {stats.get('outside_lookback', 0)}"
+        )
+    if stats.get("keyword_rejected"):
+        lines.append(f"文案二次过滤 {stats.get('keyword_rejected', 0)} 条")
+    return "\n".join(f"- {line}" for line in lines)
+
+
 def collect_validated_top_videos(
     apify_token: str,
     search_keyword: str,
@@ -854,10 +891,13 @@ def collect_validated_top_videos(
         "duration_filtered": 0,
         "relevance_rejected": 0,
         "download_failed": 0,
+        "gemini_check_failed": 0,
         "candidates_tried": 0,
         "fetch_rounds": 0,
+        "total_raw_items": 0,
     }
     last_rank_stats: dict = {}
+    search_type: Optional[str] = None
 
     def _progress(ratio: float, step: str, detail: str = ""):
         if on_progress:
@@ -869,18 +909,27 @@ def collect_validated_top_videos(
     while len(selected) < top_n and validation_stats["fetch_rounds"] < MAX_FETCH_ROUNDS:
         validation_stats["fetch_rounds"] += 1
         round_no = validation_stats["fetch_rounds"]
+        if round_no > 1 and not candidate_pool:
+            search_type = "keyword_unordered"
         _progress(
             0.08 + 0.12 * (round_no - 1),
             f"Apify 抓取候选池（第 {round_no} 轮）",
-            f"关键词：{keyword} · 上限 {results_limit} 条",
+            f"关键词：{keyword} · 上限 {results_limit} 条"
+            + (f" · 搜索模式 {search_type}" if search_type else ""),
         )
         raw_items = fetch_fb_ads(
-            apify_token, keyword, country, results_limit=results_limit
+            apify_token,
+            keyword,
+            country,
+            results_limit=results_limit,
+            search_type=search_type,
         )
+        validation_stats["total_raw_items"] += len(raw_items)
         candidates, rank_stats = rank_video_ad_candidates(
             raw_items,
             keyword,
             exclude_ad_ids=excluded_ad_ids,
+            require_keyword_in_text=False,
         )
         last_rank_stats = rank_stats
         if candidates:
@@ -915,7 +964,7 @@ def collect_validated_top_videos(
             local_path = ""
             try:
                 local_path = download_video(ad["video_url"], slot)
-            except Exception as exc:
+            except Exception:
                 validation_stats["download_failed"] += 1
                 continue
 
@@ -928,13 +977,18 @@ def collect_validated_top_videos(
             def _rel_status(msg: str, detail: str = ""):
                 _progress(ratio + 0.02, msg, detail)
 
-            relevant, reason = check_video_keyword_relevance_gemini(
-                local_path,
-                keyword,
-                raw_item=ad.get("raw") or {},
-                model_name=gemini_model,
-                on_status=_rel_status,
-            )
+            try:
+                relevant, reason = check_video_keyword_relevance_gemini(
+                    local_path,
+                    keyword,
+                    raw_item=ad.get("raw") or {},
+                    model_name=gemini_model,
+                    on_status=_rel_status,
+                )
+            except Exception:
+                validation_stats["gemini_check_failed"] += 1
+                _safe_remove_file(local_path)
+                continue
             if not relevant:
                 validation_stats["relevance_rejected"] += 1
                 _safe_remove_file(local_path)
@@ -3952,15 +4006,13 @@ with tab_fetch:
             progress.complete_step(1)
 
             if not downloaded_ads:
-                st.warning(
-                    f"⚠️ 未能凑满 {TOP_N} 条符合要求的视频。"
-                    f"已剔除 AI 广告 {kw_stats.get('ai_filtered', 0)} 条 · "
-                    f"文案不匹配 {kw_stats.get('keyword_rejected', 0)} 条 · "
-                    f"超 {MAX_VIDEO_DURATION_SEC}s {kw_stats.get('duration_filtered', 0)} 条 · "
-                    f"内容不相关 {kw_stats.get('relevance_rejected', 0)} 条"
-                )
+                st.warning(f"⚠️ 未能凑满 {TOP_N} 条符合要求的视频。")
+                with st.expander("查看筛选详情", expanded=True):
+                    st.markdown(_format_fetch_failure_diagnosis(kw_stats))
                 st.info(
-                    "建议：换更具体的关键词，或在 Meta Ad Library 网页确认该词有足够多的真人视频广告。"
+                    "常见原因：① 近 7 天内该关键词视频广告本身较少；② 视频下载失败；"
+                    "③ Gemini 判定内容与关键词无关。"
+                    "建议换更热门/更具体的关键词，或先在 Meta Ad Library 网页确认有足够视频。"
                 )
                 st.stop()
 
