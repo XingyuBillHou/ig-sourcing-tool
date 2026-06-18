@@ -878,7 +878,7 @@ SHALLOW_LOCAL_HEURISTIC_COLUMNS = (
 SHALLOW_GEMINI_HOOK_COLUMNS = SHALLOW_VIDEO_HOOK_COLUMNS
 SHALLOW_ALWAYS_BLANK_COLUMNS = frozenset({"个人见解"})
 GEMINI_VIDEO_MAX_HEIGHT = 480
-GEMINI_HOOK_CLIP_SECONDS = 5  # 仅上传前 N 秒，专注 HookVO / Text Hook 识别
+GEMINI_HOOK_CLIP_SECONDS = 3  # 仅分析前 3 秒：HookVO=台词，Text Hook=画面字幕
 GEMINI_VIDEO_MAX_SECONDS = GEMINI_HOOK_CLIP_SECONDS
 GEMINI_VIDEO_CRF = 28
 GEMINI_VIDEO_PRESET = "veryfast"
@@ -2034,26 +2034,49 @@ def shallow_row_to_markdown_table(row: dict) -> str:
 
 
 def build_hook_extraction_prompt(raw_item: Optional[dict] = None) -> str:
-    """仅提取视频 0~3 秒的 HookVO / Text Hook，输出 JSON。"""
+    """仅提取视频前 3 秒的 HookVO / Text Hook，输出 JSON。"""
     ad_copy_ref = _extract_ad_copy_text(raw_item or {})
     ad_copy_block = ""
     if ad_copy_ref:
         ad_copy_block = f"""
-【广告库配文 · 严禁抄作 HookVO / Text Hook】
+【广告库配文 · 仅供参考，严禁直接抄写进下方两列】
 {ad_copy_ref[:500]}
 """
-    return f"""请只观看这条广告视频的 **0~3 秒**，提取开场 Hook，输出**纯 JSON**（不要 Markdown 表格、不要其它说明）。
+    return f"""请只分析这条广告视频的 **前 3 秒（0:00~0:03）**，输出**纯 JSON**（不要 Markdown 表格、不要其它说明）。
 
 {ad_copy_block}
-输出格式（键名不可变）：
-{{"HookVO": "...", "Text Hook": "..."}}
+## 两列定义（必须严格遵守）
 
-规则：
-1. HookVO：0~3 秒内实际听到的口播/旁白/人声，按原语言**逐字转写**；无口播填「无口播」；听不清填「听不清」
-2. Text Hook：0~3 秒内屏幕上可见的大字、字幕、贴纸、标题，按原文**逐字抄写**；无文字填「无文字」；看不清填「看不清」
-3. **严禁**使用上方广告库配文、帖子标题、CTA、品牌 slogan 代替——它们常与视频开场不一致
-4. 不要编造、不要概括、不要翻译（除非视频本身是中文）
-5. 只输出一行 JSON，不要 markdown 代码块"""
+1. **HookVO** = 前三秒里**听到的台词**是什么？
+   - 包括：口播、旁白、画外音、人声对白
+   - 按原语言**逐字转写**，不要概括、不要翻译（除非视频本身是中文）
+   - 没有人声/台词 → 填「无口播」
+   - 有人声但听不清 → 填「听不清」
+
+2. **Text Hook** = 前三秒**画面里出现的字幕**是什么？
+   - 仅指：烧录在画面上的字幕/caption/底部白字/大号 overlay 字幕
+   - **不要**把以下内容当作 Text Hook：帖子标题、广告配文、按钮 CTA、贴纸装饰字、品牌 logo 字
+   - 没有字幕 → 填「无字幕」
+   - 有字幕但看不清 → 填「看不清」
+
+输出格式（键名不可变，只输出一行 JSON）：
+{{"HookVO": "...", "Text Hook": "..."}}
+"""
+
+
+def _finalize_hook_fields(hook: dict) -> dict:
+    """Gemini 识别后规范化 J/K 列；空值用明确占位，避免落成「未知」。"""
+    hook_vo = str(hook.get("HookVO") or "").strip()
+    text_hook = str(hook.get("Text Hook") or "").strip()
+    if text_hook in ("无文字", "无"):
+        text_hook = ""
+    if hook_vo in ("无",):
+        hook_vo = ""
+    if not hook_vo:
+        hook_vo = "无口播"
+    if not text_hook:
+        text_hook = "无字幕"
+    return {"HookVO": hook_vo, "Text Hook": text_hook}
 
 
 def parse_hook_extraction_response(text: str) -> dict:
@@ -2083,6 +2106,8 @@ def parse_hook_extraction_response(text: str) -> dict:
             data.get("HookVO")
             or data.get("hookvo")
             or data.get("hook_vo")
+            or data.get("台词")
+            or data.get("hook_vo_lines")
             or ""
         ).strip()
         text_hook = str(
@@ -2090,10 +2115,12 @@ def parse_hook_extraction_response(text: str) -> dict:
             or data.get("text_hook")
             or data.get("TextHook")
             or data.get("textHook")
+            or data.get("字幕")
+            or data.get("text_hook_caption")
             or ""
         ).strip()
         if hook_vo or text_hook:
-            return {"HookVO": hook_vo, "Text Hook": text_hook}
+            return _finalize_hook_fields({"HookVO": hook_vo, "Text Hook": text_hook})
     return {}
 
 
@@ -2245,7 +2272,8 @@ def _generate_hook_content_with_models(
     for idx, candidate in enumerate(_gemini_model_candidates(model_name or "")):
         gen_config = {
             "temperature": 0,
-            "max_output_tokens": 512,
+            "max_output_tokens": 768,
+            "response_mime_type": "application/json",
         }
         if _gemini_supports_thinking_budget(candidate):
             gen_config["thinking_config"] = {"thinking_budget": 0}
@@ -2265,6 +2293,17 @@ def _generate_hook_content_with_models(
             except Exception as exc:
                 if "thinking" in str(exc).lower() and "thinking_config" in gen_config:
                     gen_config.pop("thinking_config")
+                    return candidate, model.generate_content(
+                        [video_file, prompt],
+                        generation_config=gen_config,
+                        request_options={"timeout": GEMINI_API_TIMEOUT_SEC},
+                    )
+                if "response_mime_type" in gen_config and (
+                    "response_mime_type" in str(exc).lower()
+                    or "mime" in str(exc).lower()
+                    or "json" in str(exc).lower()
+                ):
+                    gen_config.pop("response_mime_type")
                     return candidate, model.generate_content(
                         [video_file, prompt],
                         generation_config=gen_config,
@@ -2290,7 +2329,7 @@ def extract_video_hooks_with_gemini(
     model_name: Optional[str] = None,
     on_status: Optional[Callable[[str, str], None]] = None,
 ) -> dict:
-    """上传视频前 5 秒 -> 仅识别 HookVO / Text Hook。"""
+    """上传视频前 3 秒 -> 识别 HookVO（台词）/ Text Hook（画面字幕）。"""
     prompt = build_hook_extraction_prompt(raw_item)
     video_file = None
     compressed_path = None
@@ -2307,7 +2346,7 @@ def extract_video_hooks_with_gemini(
         video_file = upload_and_wait_active(upload_path, on_status=on_status)
         if on_status:
             on_status(
-                f"正在识别第 {video_index} 条 J/K 列（HookVO · Text Hook）...",
+                f"正在识别第 {video_index} 条 J/K 列（HookVO=台词 · Text Hook=字幕）...",
                 f"模型：{resolve_gemini_model(model_name or '')} · 前 {GEMINI_HOOK_CLIP_SECONDS}s",
             )
 
@@ -2319,6 +2358,8 @@ def extract_video_hooks_with_gemini(
         )
         _GEMINI_RUNTIME["model"] = used_model
         hooks = parse_hook_extraction_response(response.text or "")
+        if not hooks and (response.text or "").strip():
+            hooks = _finalize_hook_fields({})
         return _sanitize_gemini_hook_fields(hooks, raw_item)
     except Exception as exc:
         raise RuntimeError(_gemini_error_hint(exc)) from exc
@@ -2657,14 +2698,15 @@ def _ad_copy_overlap(val: str, ad_copy: str) -> bool:
 
 
 def _sanitize_gemini_hook_fields(hook: dict, raw_item: Optional[dict] = None) -> dict:
-    """剔除 Gemini 照搬广告库配文的 HookVO / Text Hook。"""
+    """剔除 Gemini 照搬广告库配文的 Text Hook（HookVO 为听到的台词，不做此过滤）。"""
     out = {col: str(hook.get(col) or "").strip() for col in SHALLOW_VIDEO_HOOK_COLUMNS}
     ad_copy = _extract_ad_copy_text(raw_item or {})
-    for col in SHALLOW_VIDEO_HOOK_COLUMNS:
-        val = out.get(col) or ""
-        if _ad_copy_overlap(val, ad_copy):
-            out[col] = ""
-    return out
+    if ad_copy:
+        val = out.get("Text Hook") or ""
+        # 仅当整段配文被照搬时清空，避免误杀短字幕
+        if val and len(val) >= 24 and _ad_copy_overlap(val, ad_copy):
+            out["Text Hook"] = ""
+    return _finalize_hook_fields(out)
 
 
 def merge_shallow_rows(*layers: dict) -> dict:
@@ -3065,8 +3107,7 @@ def render_export_download_section(
     st.subheader("📊 浅捞结果")
     if results and not _results_used_gemini_video(results):
         st.caption(
-            "💡 本地模式下 J/K 列（HookVO · Text Hook）为「未知」；"
-            "请切换 Gemini 视频模式识别前 3 秒口播/画面字。个人见解列留空。"
+            "💡 本地模式下 J/K 列为「未知」：HookVO=前三秒台词、Text Hook=前三秒画面字幕，需 Gemini 视频模式识别。"
         )
     tabs = st.tabs([f"#{r['index']} {r.get('brand_name', '')}" for r in results])
     for tab, r in zip(tabs, results):
@@ -3470,7 +3511,7 @@ with st.sidebar:
                 st.error(f"❌ {err}")
         st.caption(
             f"当前模型：`{gemini_model}` · "
-            f"前 {GEMINI_HOOK_CLIP_SECONDS}s 识别 J/K · "
+            f"前 {GEMINI_HOOK_CLIP_SECONDS}s · HookVO=台词 / Text Hook=字幕 · "
             f"压缩 {GEMINI_VIDEO_MAX_HEIGHT}p · 已排除 Lite 弱模型"
         )
     st.markdown("---")
@@ -3798,7 +3839,7 @@ with tab_analyze:
             "gemini": "Gemini 视频浅捞（需 VPN）",
         }[x],
         horizontal=True,
-        help="本地模式可填镜头/音频等列；J/K 列（HookVO · Text Hook）需 Gemini 看视频识别。",
+        help="本地模式不填 J/K 列。Gemini 模式识别：HookVO=前三秒台词，Text Hook=前三秒画面字幕。",
     )
     if analyze_mode == "local":
         st.caption("本地模式不填 J/K 列与个人见解；Gemini 模式仅精准识别 J/K 列。")
@@ -3806,7 +3847,7 @@ with tab_analyze:
         _active_model = resolve_gemini_model()
         st.caption(
             f"当前 Gemini 模型：`{_active_model}` · {get_gemini_model_label(_active_model)} · "
-            f"仅上传前 {GEMINI_HOOK_CLIP_SECONDS}s 识别 J/K 列 · 个人见解列留空"
+            f"仅分析前 {GEMINI_HOOK_CLIP_SECONDS}s：HookVO=台词，Text Hook=画面字幕 · 个人见解列留空"
         )
 
     analyze_button = st.button(
