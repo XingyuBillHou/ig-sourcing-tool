@@ -4066,7 +4066,7 @@ with tab_fetch:
             )
             meta_results = finalize_shallow_results(
                 meta_results,
-                expected_count=len(top_ads),
+                expected_count=len(downloaded_ads),
             )
             full_zip_bytes, full_zip_name = build_export_zip(
                 meta_results, search_keyword.strip(), country
