@@ -160,6 +160,20 @@ def _dedupe_ads(items: list) -> list:
     return deduped
 
 
+def _apify_run_dataset_id(run) -> str:
+    """从 Apify run 结果提取 dataset ID（兼容 dict 与 apify-client v3+ 的 Run 模型）。"""
+    if run is None:
+        raise RuntimeError("Apify Actor 运行未返回结果")
+    if isinstance(run, dict):
+        dataset_id = run.get("defaultDatasetId") or run.get("default_dataset_id")
+    else:
+        dataset_id = getattr(run, "default_dataset_id", None)
+    if not dataset_id:
+        status = getattr(run, "status", None) if not isinstance(run, dict) else run.get("status")
+        raise RuntimeError(f"Apify run 缺少 defaultDatasetId（status={status}）")
+    return str(dataset_id)
+
+
 def fetch_fb_ads(apify_token: str, search_keyword: str, country: str = "ALL") -> list:
     """从 Meta Ad Library 全库按关键词抓取视频广告。"""
     client = ApifyClient(apify_token)
@@ -173,7 +187,7 @@ def fetch_fb_ads(apify_token: str, search_keyword: str, country: str = "ALL") ->
     }
 
     run = client.actor(FB_ADS_ACTOR_ID).call(run_input=run_input)
-    dataset_id = run["defaultDatasetId"]
+    dataset_id = _apify_run_dataset_id(run)
 
     items = list(client.dataset(dataset_id).iterate_items())
     return _dedupe_ads(items)

@@ -13,6 +13,7 @@ usage() {
   bash deploy.sh lan      局域网部署（同一 WiFi 内其他电脑可访问）
   bash deploy.sh docker   本地 Docker（仅本机 http://localhost:8501）
   bash deploy.sh cloud    云端 VPS 部署（公网 HTTPS，见 deploy-cloud.sh）
+  bash deploy.sh streamlit  Streamlit Cloud 部署（GitHub + share.streamlit.io）
 
 局域网示例:
   1. 在本机运行: bash deploy.sh lan
@@ -58,6 +59,9 @@ case "$MODE" in
     ;;
   cloud)
     bash "$APP_DIR/deploy-cloud.sh" up
+    ;;
+  streamlit)
+    bash "$APP_DIR/deploy-streamlit-cloud.sh"
     ;;
   -h|--help|help)
     usage
