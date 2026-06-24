@@ -48,7 +48,7 @@ from suite_shared import (
 PAGE_ICON = ROOT / "page_icon.png"
 
 st.set_page_config(
-    page_title="跨境电商营销工具套件",
+    page_title="NuageWears工具组",
     page_icon=str(PAGE_ICON) if PAGE_ICON.exists() else "🛠️",
     layout="wide",
 )
@@ -204,7 +204,7 @@ def _render_shared_sidebar() -> None:
 def main() -> None:
     _render_shared_sidebar()
 
-    st.title("跨境电商营销工具套件")
+    st.title("NuageWears工具组")
     st.caption("FB 广告库浅捞 · 投放数据 AI 分析（Gemini / Apify 密钥共用）")
 
     tab_fb, tab_analysis = st.tabs(["🎬 FB 广告库浅捞", "📊 投放数据 AI 分析"])

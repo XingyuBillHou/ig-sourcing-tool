@@ -1,0 +1,15 @@
+---
+description: Commit and push code changes without asking the user
+alwaysApply: true
+---
+
+# Auto push after changes
+
+When you finish implementing requested changes in this repository:
+
+1. Commit the relevant files with a concise message (do not commit unrelated local edits).
+2. Push to `origin/main` immediately — do not ask whether to push.
+3. Use `git -c http.version=HTTP/1.1 push origin main` if a plain push fails with HTTP2 errors.
+4. Report push success or failure briefly after the change summary.
+
+Exceptions: do not push files that likely contain secrets (`.env`, credentials, `secrets.toml` with real keys).

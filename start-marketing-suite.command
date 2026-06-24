@@ -5,7 +5,7 @@ APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$APP_DIR"
 
 echo "========================================"
-echo "  跨境电商营销工具套件"
+echo "  NuageWears工具组"
 echo "  FB 广告库浅捞 + 投放数据 AI 分析"
 echo "  $(date)"
 echo "========================================"
