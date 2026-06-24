@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY fb_competitor_ad_app.py .
+COPY fb_competitor_ad_app.py fb_competitor_ad_core.py .
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY .streamlit/config.toml .streamlit/config.toml
 

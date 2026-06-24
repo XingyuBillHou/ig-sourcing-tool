@@ -9,6 +9,7 @@ import re
 import streamlit as st
 
 SUITE_GEMINI_API_KEY = "suite_gemini_api_key"
+SUITE_TITLE = "NuageWears工具组"
 SUITE_SMTP_HOST = "suite_smtp_host"
 SUITE_SMTP_PORT = "suite_smtp_port"
 SUITE_SMTP_USER = "suite_smtp_user"

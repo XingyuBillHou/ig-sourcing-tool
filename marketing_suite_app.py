@@ -19,7 +19,7 @@ for path in (str(ROOT), str(FB_DIR)):
         sys.path.insert(0, path)
 
 import ad_analysis_app
-from fb_competitor_ad_app import (  # noqa: E402
+from fb_competitor_ad_core import (  # noqa: E402
     APIFY_TOKEN_SESSION_KEY,
     GEMINI_MODEL,
     GEMINI_MODEL_SESSION_KEY,
@@ -41,6 +41,7 @@ from suite_shared import (
     SUITE_SMTP_PASSWORD,
     SUITE_SMTP_PORT,
     SUITE_SMTP_USER,
+    SUITE_TITLE,
     get_gemini_api_key,
     secret,
 )
@@ -48,7 +49,7 @@ from suite_shared import (
 PAGE_ICON = ROOT / "page_icon.png"
 
 st.set_page_config(
-    page_title="NuageWears工具组",
+    page_title=SUITE_TITLE,
     page_icon=str(PAGE_ICON) if PAGE_ICON.exists() else "🛠️",
     layout="wide",
 )
@@ -68,7 +69,7 @@ def _init_shared_session_state() -> None:
     if SUITE_SMTP_PASSWORD not in st.session_state:
         st.session_state[SUITE_SMTP_PASSWORD] = secret("email", "smtp_password")
     if SUITE_SMTP_FROM_NAME not in st.session_state:
-        st.session_state[SUITE_SMTP_FROM_NAME] = secret("email", "from_name", "营销工具套件")
+        st.session_state[SUITE_SMTP_FROM_NAME] = secret("email", "from_name", SUITE_TITLE)
 
     _model_options = get_gemini_video_model_options()
     _model_ids = [item["id"] for item in _model_options]
@@ -204,7 +205,7 @@ def _render_shared_sidebar() -> None:
 def main() -> None:
     _render_shared_sidebar()
 
-    st.title("NuageWears工具组")
+    st.title(SUITE_TITLE)
     st.caption("FB 广告库浅捞 · 投放数据 AI 分析（Gemini / Apify 密钥共用）")
 
     tab_fb, tab_analysis = st.tabs(["🎬 FB 广告库浅捞", "📊 投放数据 AI 分析"])
