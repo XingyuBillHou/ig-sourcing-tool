@@ -49,12 +49,11 @@ api_key = "AIzaSyxxxxxxxx"
 
 ## 从旧版 FB 单工具迁移
 
-若之前 Main file 为 `fb-competitor-ad-tool/fb_competitor_ad_app.py`：
+Streamlit **Community Cloud 不支持**修改已部署应用的 Main file path（Settings 里只有 URL、Secrets 等，没有入口文件选项）。
 
-1. 打开 https://share.streamlit.io → 你的应用 → **Settings**
-2. 将 **Main file path** 改为 `marketing_suite_app.py`
-3. 点击 **Save**，然后 **Reboot app**
-4. 或删除旧应用后运行 `bash deploy-streamlit-cloud.sh` 重新创建
+**方案 A（推荐，已内置）：** 保持 Main file 为 `fb-competitor-ad-tool/fb_competitor_ad_app.py` 不变。该文件在最新代码中会自动跳转到 `marketing_suite_app.py`，`git push` 后等待 Cloud 重新构建即可。
+
+**方案 B：** 删除旧应用 → 运行 `bash deploy-streamlit-cloud.sh` 重新部署，Main file 填 `marketing_suite_app.py`，可沿用同一子域名（如 `fb-ad-tool`）。
 
 ## 自动更新
 

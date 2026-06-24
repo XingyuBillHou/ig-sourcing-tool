@@ -4771,5 +4771,14 @@ def render_fb_competitor_tool(*, embedded: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    _configure_page_standalone()
-    render_fb_competitor_tool(embedded=False)
+    # Community Cloud 无法修改已部署应用的 Main file path；
+    # 旧入口仍指向本文件时，自动启动根目录的营销工具套件。
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from marketing_suite_app import main as run_marketing_suite
+
+    run_marketing_suite()
