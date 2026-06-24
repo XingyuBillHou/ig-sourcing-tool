@@ -1,5 +1,5 @@
 #!/bin/bash
-# 打开 Streamlit Community Cloud 部署页（仓库/分支/入口文件已预填）
+# 打开 Streamlit Community Cloud 部署页（营销工具套件）
 set -euo pipefail
 
 REPO="${STREAMLIT_REPO:-XingyuBillHou/ig-sourcing-tool}"
@@ -11,17 +11,17 @@ DEPLOY_URL="https://share.streamlit.io/deploy?repository=${REPO}&branch=${BRANCH
 
 cat <<EOF
 ==========================================
-  Streamlit Cloud 一键部署
+  Streamlit Cloud — 营销工具套件
+  FB 广告库浅捞 + 投放数据 AI 分析
 ==========================================
 
 1. 浏览器将打开预填好的部署页
 2. 用 GitHub 登录 Streamlit（若尚未登录）
-3. 确认配置后点击 Deploy
-4. 部署完成后 → App Settings → Secrets，粘贴:
+3. Main file path 应为: ${MAIN_FILE}
+4. 若已有旧应用，请在 App Settings 修改 Main file path 后 Reboot
+5. Secrets 见 .streamlit/secrets.toml.example
 
-   见 .streamlit/secrets.toml.example
-
-5. 访问: https://${SUBDOMAIN}.streamlit.app
+访问: https://${SUBDOMAIN}.streamlit.app
 
 预填部署链接:
 ${DEPLOY_URL}

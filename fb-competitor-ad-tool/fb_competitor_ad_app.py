@@ -35,7 +35,26 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import streamlit as st
 from apify_client import ApifyClient
+try:
+    from apify_client.errors import ApifyApiError
+except ImportError:
+    ApifyApiError = Exception
 import google.generativeai as genai
+
+import sys
+
+_SUITE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SUITE_ROOT not in sys.path:
+    sys.path.insert(0, _SUITE_ROOT)
+from suite_shared import (
+    SUITE_GEMINI_API_KEY,
+    SUITE_SMTP_FROM_NAME,
+    SUITE_SMTP_HOST,
+    SUITE_SMTP_PASSWORD,
+    SUITE_SMTP_PORT,
+    SUITE_SMTP_USER,
+    get_gemini_api_key,
+)
 
 # ------------------------------------------------------------------
 # 全局配置
@@ -46,9 +65,12 @@ EXPORT_DIR = os.path.join(APP_DIR, "exports")
 FB_ADS_ACTOR_ID = "apify/facebook-ads-scraper"
 TOP_N = 3
 FETCH_LOOKBACK_DAYS = 7
+FETCH_LOOKBACK_STAGES = (7, 14, 30, 60)  # 优先 7 天；凑不满 Top3 再逐步放宽
 MAX_VIDEO_DURATION_SEC = 60  # 超过 1 分钟的视频剔除
-FETCH_CANDIDATE_POOL_LIMIT = 200  # 单次抓取候选池（用于验证后凑满 Top 3）
-MAX_FETCH_ROUNDS = 3  # 候选不足时追加抓取轮次（提高 resultsLimit / 放宽搜索模式）
+FETCH_CANDIDATE_POOL_LIMIT = 300  # 单次抓取候选池
+MAX_FETCH_ROUNDS = 4  # 每个时间窗内的 Apify 重试次数
+FALLBACK_TRUST_META_SEARCH = True  # 严格筛选凑不满 Top3 时，信任 Meta 关键词搜索补齐
+TRUST_META_ON_GEMINI_FAILURE = True  # Gemini 调用异常时仍保留视频（信任 Meta 搜索结果）
 RELEVANCE_CLIP_SECONDS = 15  # Gemini 判定视频与关键词相关性时分析前 N 秒
 POLL_INTERVAL_SEC = 3
 RESULTS_LIMIT = FETCH_CANDIDATE_POOL_LIMIT
@@ -82,7 +104,8 @@ _VIDEO_URL_KEYS = (
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
-st.set_page_config(page_title="FB 广告库浅捞工具", page_icon="🎬", layout="wide")
+def _configure_page_standalone() -> None:
+    st.set_page_config(page_title="FB 广告库浅捞工具", page_icon="🎬", layout="wide")
 
 
 def _secret(section: str, key: str, default: str = "") -> str:
@@ -128,17 +151,16 @@ def build_ad_library_url(
     country: str = "ALL",
     lookback_days: int = FETCH_LOOKBACK_DAYS,
     search_type: Optional[str] = None,
+    apply_date_filter: bool = True,
 ) -> str:
-    """构建 Meta Ad Library 全库关键词 + 仅视频 + 近 N 天投放 搜索 URL。"""
+    """构建 Meta Ad Library 全库关键词 + 仅视频 + 可选近 N 天投放 搜索 URL。"""
     q = search_keyword.strip()
     today = datetime.now().date()
     min_date = today - timedelta(days=lookback_days)
     if search_type is None:
-        if re.search(r"\s", q) or re.search(r"[\u4e00-\u9fff]{2,}", q):
-            search_type = "keyword_exact_phrase"
-        else:
-            search_type = "keyword_unordered"
-    return (
+        # 默认无序关键词，结果面比 exact_phrase 更广
+        search_type = "keyword_unordered"
+    url = (
         "https://www.facebook.com/ads/library/"
         f"?active_status=active"
         f"&ad_type=all"
@@ -148,9 +170,13 @@ def build_ad_library_url(
         f"&search_type={search_type}"
         f"&sort_data[mode]=total_impressions"
         f"&sort_data[direction]=desc"
-        f"&start_date[min]={min_date.isoformat()}"
-        f"&start_date[max]={today.isoformat()}"
     )
+    if apply_date_filter:
+        url += (
+            f"&start_date[min]={min_date.isoformat()}"
+            f"&start_date[max]={today.isoformat()}"
+        )
+    return url
 
 
 def _dedupe_ads(items: list) -> list:
@@ -186,6 +212,67 @@ def _apify_run_dataset_id(run) -> str:
     return str(dataset_id)
 
 
+def _sanitize_apify_token(token: str) -> str:
+    """去除首尾空白与误粘贴的引号。"""
+    return (token or "").strip().strip('"').strip("'")
+
+
+def _looks_like_placeholder_apify_token(token: str) -> bool:
+    lowered = token.lower()
+    return "xxxx" in lowered or lowered in {"apify_api_", "your_token", "your-token"}
+
+
+def check_apify_connectivity(apify_token: str, timeout: float = 12.0) -> tuple[bool, str]:
+    """启动 Actor 前快速校验 Apify Token 是否有效。"""
+    token = _sanitize_apify_token(apify_token)
+    if not token:
+        return False, "未填写 Apify API Token。"
+    if _looks_like_placeholder_apify_token(token):
+        return False, "Apify Token 仍是示例占位符，请替换为真实 Token。"
+    if not token.startswith("apify_api_"):
+        return False, "Apify Token 格式异常（应以 apify_api_ 开头），请检查是否复制完整。"
+
+    try:
+        client = ApifyClient(token)
+        client.user().get()
+        return True, ""
+    except ApifyApiError as exc:
+        msg = str(exc)
+        if "not valid" in msg.lower() or "unauthorized" in msg.lower() or "not found" in msg.lower():
+            return False, (
+                "Apify Token 无效或已过期。"
+                "请在 Apify 控制台 → Settings → Integrations 重新生成 Personal API token，"
+                "并更新 Streamlit Cloud Secrets 或侧边栏输入框。"
+            )
+        return False, f"Apify 连接失败：{msg}"
+    except Exception as exc:
+        return False, f"Apify 连接失败：{exc}"
+
+
+def _is_apify_auth_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    if isinstance(exc, ApifyApiError) and getattr(exc, "status_code", None) == 401:
+        return True
+    return "authentication token is not valid" in msg or "user was not found" in msg
+
+
+def _apify_auth_help_markdown() -> str:
+    return """**如何配置 Apify Token（Streamlit Cloud）**
+
+1. 打开 [Apify → Settings → Integrations](https://console.apify.com/account/integrations)
+2. 复制 **Personal API tokens**（格式类似 `apify_api_xxxxxxxx`）
+3. 打开 Streamlit Cloud → 你的 App → **Settings → Secrets**，粘贴：
+
+```toml
+[apify]
+token = "apify_api_你的真实Token"
+```
+
+4. 点击 **Save**，等待 App 自动重启后再试
+
+也可在侧边栏 **Apify API Token** 输入框直接填写（会覆盖 Secrets 中的空值）。"""
+
+
 def fetch_fb_ads(
     apify_token: str,
     search_keyword: str,
@@ -193,10 +280,21 @@ def fetch_fb_ads(
     *,
     results_limit: int = RESULTS_LIMIT,
     search_type: Optional[str] = None,
+    lookback_days: int = FETCH_LOOKBACK_DAYS,
+    apply_date_filter: bool = True,
 ) -> list:
     """从 Meta Ad Library 全库按关键词抓取视频广告。"""
+    apify_token = _sanitize_apify_token(apify_token)
+    if not apify_token:
+        raise RuntimeError("未配置 Apify API Token")
     client = ApifyClient(apify_token)
-    ad_library_url = build_ad_library_url(search_keyword, country, search_type=search_type)
+    ad_library_url = build_ad_library_url(
+        search_keyword,
+        country,
+        lookback_days=lookback_days,
+        search_type=search_type,
+        apply_date_filter=apply_date_filter,
+    )
 
     run_input = {
         "startUrls": [{"url": ad_library_url}],
@@ -230,50 +328,14 @@ def _truthy_flag(val) -> bool:
     return False
 
 
-def _is_ai_generated_ad(item: dict) -> bool:
-    """判定 Meta 标记或文案提示为 AI / 数字合成视频的广告。"""
-    for key in (
-        "containsDigitalCreatedMedia",
-        "contains_digital_created_media",
-        "containsDigitallyCreatedMedia",
-        "isDigitalCreatedMedia",
-        "is_digital_created_media",
-    ):
-        if _truthy_flag(item.get(key)):
-            return True
-
-    snapshot = item.get("snapshot") or {}
-    if isinstance(snapshot, dict):
-        for key in (
-            "containsDigitalCreatedMedia",
-            "contains_digital_created_media",
-            "containsDigitallyCreatedMedia",
-        ):
-            if _truthy_flag(snapshot.get(key)):
-                return True
-
-    ad_details = item.get("ad_details") or item.get("adDetails") or {}
-    if isinstance(ad_details, dict):
-        for key in (
-            "containsDigitalCreatedMedia",
-            "contains_digital_created_media",
-        ):
-            if _truthy_flag(ad_details.get(key)):
-                return True
-
-    haystack = _extract_searchable_ad_text(item)
-    ai_markers = (
-        "ai-generated",
-        "ai generated",
-        "generated with ai",
-        "digitally created",
-        "digital creator",
-        "人工智能生成",
-        "ai生成",
-        "ai 生成",
-        "数字合成",
-    )
-    return any(marker in haystack for marker in ai_markers)
+def _is_fully_ai_generated_ad(item: dict) -> bool:
+    """
+    仅判定「全篇 AI / 数字合成」广告（预筛阶段）。
+    Meta 的 containsDigitalCreatedMedia 只表示含部分 AI 素材，不能用来剔除；
+    含穿插 AI 片段的混剪视频应保留，由后续 Gemini 看视频再判是否全篇 AI。
+    """
+    _ = item
+    return False
 
 
 def _extract_brand_name(item: dict) -> str:
@@ -334,22 +396,32 @@ def _extract_video_url(item: dict):
 
 def _extract_start_date(item: dict):
     """兼容不同字段名与 Unix 时间戳格式的开始投放日期。"""
-    for key in (
+    containers = [item]
+    snapshot = item.get("snapshot") or {}
+    if isinstance(snapshot, dict):
+        containers.append(snapshot)
+    for details_key in ("ad_details", "adDetails", "details"):
+        details = item.get(details_key) or {}
+        if isinstance(details, dict):
+            containers.append(details)
+
+    date_keys = (
         "startDateFormatted",
         "start_date_formatted",
         "startDate",
         "start_date",
         "adDeliveryStartTime",
         "adStartDate",
-    ):
-        val = item.get(key)
-        if val not in (None, "", 0):
-            return val
-
-    snapshot = item.get("snapshot") or {}
-    if isinstance(snapshot, dict):
-        for key in ("startDate", "start_date", "startDateFormatted"):
-            val = snapshot.get(key)
+        "deliveryStartTime",
+        "delivery_start_time",
+        "ad_delivery_start_time",
+        "collationStartDate",
+    )
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in date_keys:
+            val = container.get(key)
             if val not in (None, "", 0):
                 return val
     return None
@@ -412,13 +484,47 @@ def _parse_start_date_to_datetime(val) -> Optional[datetime]:
     return None
 
 
-def _is_ad_started_within_lookback(item: dict, lookback_days: int = FETCH_LOOKBACK_DAYS) -> bool:
+def _is_ad_started_within_lookback(
+    item: dict,
+    lookback_days: int = FETCH_LOOKBACK_DAYS,
+    *,
+    allow_missing_start_date: bool = False,
+) -> bool:
     """广告是否在近 lookback_days 天内开始投放。"""
-    start_dt = _parse_start_date_to_datetime(_extract_start_date(item))
+    start_val = _extract_start_date(item)
+    if not start_val:
+        return allow_missing_start_date
+    start_dt = _parse_start_date_to_datetime(start_val)
     if not start_dt:
-        return False
+        return allow_missing_start_date
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     return start_dt >= cutoff
+
+
+def _lookback_priority(item: dict, preferred_days: int) -> int:
+    """数值越小越优先：在 preferred_days 内最佳，否则依次 14/30/60/90 天。"""
+    seen = set()
+    windows = []
+    for days in (preferred_days, 14, 30, 60, 90):
+        if days not in seen:
+            windows.append(days)
+            seen.add(days)
+    for idx, days in enumerate(windows):
+        if _is_ad_started_within_lookback(item, days, allow_missing_start_date=True):
+            return idx
+    return len(windows)
+
+
+def _sort_pool_for_selection(pool: dict[str, dict], keyword: str, preferred_days: int) -> list[dict]:
+    """优先近 preferred_days 天高曝光视频，再逐步放宽。"""
+    return sorted(
+        pool.values(),
+        key=lambda ad: (
+            _lookback_priority(ad.get("raw") or {}, preferred_days),
+            -ad.get("impression_score", -1),
+            -_keyword_relevance_score(ad.get("raw") or {}, keyword),
+        ),
+    )
 
 
 def diagnose_ad_items(items: list) -> dict:
@@ -543,15 +649,19 @@ def rank_video_ad_candidates(
     lookback_days: int = FETCH_LOOKBACK_DAYS,
     *,
     exclude_ad_ids: Optional[set] = None,
+    exclude_video_urls: Optional[set] = None,
     require_keyword_in_text: bool = False,
+    allow_missing_start_date: bool = False,
+    enforce_lookback: bool = True,
 ) -> tuple[list, dict]:
     """
     从 Apify 结果中筛出候选视频广告并排序（不截断 top_n）：
-    含视频 · 近 N 天 · 非 AI 生成
+    含视频 · 近 N 天 · 非全篇 AI（全篇 AI 由 Gemini 下载后判定）
     关键词相关性：默认信任 Meta 搜索 URL（require_keyword_in_text=False），
     由后续 Gemini 看视频内容再验证。
     """
     exclude_ad_ids = exclude_ad_ids or set()
+    exclude_video_urls = exclude_video_urls or set()
     all_video_ads = []
     ai_filtered = 0
     keyword_rejected = 0
@@ -565,19 +675,29 @@ def rank_video_ad_candidates(
         if ad_id and ad_id in exclude_ad_ids:
             excluded_seen += 1
             continue
-        if _is_ai_generated_ad(item):
-            ai_filtered += 1
-            continue
-
         video_url = _extract_video_url(item)
         if not video_url:
             no_video += 1
             continue
+        if video_url in exclude_video_urls:
+            excluded_seen += 1
+            continue
+        if _is_fully_ai_generated_ad(item):
+            ai_filtered += 1
+            continue
+
         start_date = _extract_start_date(item)
         if not start_date:
-            no_start_date += 1
-            continue
-        if not _is_ad_started_within_lookback(item, lookback_days):
+            if allow_missing_start_date:
+                start_date = ""
+            else:
+                no_start_date += 1
+                continue
+        if enforce_lookback and not _is_ad_started_within_lookback(
+            item,
+            lookback_days,
+            allow_missing_start_date=allow_missing_start_date,
+        ):
             outside_lookback += 1
             continue
 
@@ -623,6 +743,15 @@ def rank_video_ad_candidates(
         return [], stats
 
     kw = (search_keyword or "").strip()
+    # 同一视频 URL 只保留曝光最高的一条（避免多条广告共用素材占满候选池）
+    by_video_url: dict[str, dict] = {}
+    for ad in all_video_ads:
+        vurl = ad["video_url"]
+        prev = by_video_url.get(vurl)
+        if prev is None or ad["impression_score"] > prev["impression_score"]:
+            by_video_url[vurl] = ad
+    all_video_ads = list(by_video_url.values())
+
     all_video_ads.sort(
         key=lambda ad: (
             -ad["impression_score"],
@@ -739,24 +868,48 @@ def download_video(video_url: str, index: int) -> str:
     ) from last_err
 
 
-def build_keyword_relevance_prompt(search_keyword: str) -> str:
-    """Gemini 判定视频内容是否与搜索关键词相关。"""
+def build_keyword_relevance_prompt(search_keyword: str, *, lenient: bool = False) -> str:
+    """Gemini 判定视频：关键词相关性 + 是否全篇 AI。"""
     kw = (search_keyword or "").strip()
-    return f"""请观看这条广告视频（重点看画面、口播、展示的商品/场景），判断是否与搜索关键词「{kw}」**明显相关**。
+    lenient_note = ""
+    if lenient:
+        lenient_note = (
+            f"\n注意：该广告来自 Meta 关键词「{kw}」搜索结果。"
+            "除非视频明显属于完全无关品类，否则应判定 relevant=true。\n"
+        )
+    return f"""请观看这条广告视频（重点看画面、口播、展示的商品/场景），完成两项判定：
 
-相关：视频推广的产品、品类、使用场景、目标受众或品牌与关键词一致或高度接近。
-不相关：明显其它品类、误推广告、仅广告库配文沾边但视频内容无关。
+1. **relevant** — 是否与搜索关键词「{kw}」明显相关
+   - 相关：推广的产品、品类、使用场景、目标受众或品牌与关键词一致或高度接近
+   - 不相关：明显其它品类、误推广告、仅广告库配文沾边但视频内容无关
 
+2. **fully_ai** — 是否**全篇**均为 AI / 数字合成生成（无真实实拍画面）
+   - fully_ai=true：整段视频几乎都是 AI 虚拟人、AI 场景、纯数字合成，没有真实拍摄素材
+   - fully_ai=false：以真实拍摄为主；或真人出镜 + 部分 AI 镜头/特效穿插；或混剪中含少量 AI 片段
+{lenient_note}
 只输出一行 JSON（不要 markdown）：
-{{"relevant": true}}
+{{"relevant": true, "fully_ai": false}}
 或
-{{"relevant": false, "reason": "简短原因"}}"""
+{{"relevant": false, "fully_ai": false, "reason": "简短原因"}}
+或
+{{"relevant": true, "fully_ai": true, "reason": "全篇AI"}}"""
 
 
-def parse_keyword_relevance_response(text: str) -> tuple[Optional[bool], str]:
+def _parse_bool_field(val) -> Optional[bool]:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "yes", "1")
+    if isinstance(val, (int, float)):
+        return val == 1
+    return None
+
+
+def parse_keyword_relevance_response(text: str) -> tuple[Optional[bool], Optional[bool], str]:
+    """解析 Gemini 返回的 relevant / fully_ai 判定。"""
     raw = (text or "").strip()
     if not raw:
-        return None, ""
+        return None, None, ""
     candidates = [raw]
     for pattern in (r"```json\s*(.*?)\s*```", r"```\s*(.*?)\s*```"):
         match = re.search(pattern, raw, re.DOTALL | re.IGNORECASE)
@@ -773,18 +926,17 @@ def parse_keyword_relevance_response(text: str) -> tuple[Optional[bool], str]:
             continue
         if not isinstance(data, dict):
             continue
-        if "relevant" in data:
-            val = data.get("relevant")
-            if isinstance(val, bool):
-                return val, str(data.get("reason") or "").strip()
-            if isinstance(val, str):
-                return val.strip().lower() in ("true", "yes", "1"), str(data.get("reason") or "").strip()
+        relevant = _parse_bool_field(data.get("relevant"))
+        fully_ai = _parse_bool_field(data.get("fully_ai", data.get("fullyAi")))
+        reason = str(data.get("reason") or "").strip()
+        if relevant is not None or fully_ai is not None:
+            return relevant, fully_ai, reason
         lower = candidate.lower()
         if any(w in lower for w in ("false", "不相关", "无关", "irrelevant", "no")):
-            return False, candidate[:120]
+            return False, fully_ai, candidate[:120]
         if any(w in lower for w in ("true", "相关", "relevant", "yes")):
-            return True, candidate[:120]
-    return None, ""
+            return True, fully_ai, candidate[:120]
+    return None, None, ""
 
 
 def check_video_keyword_relevance_gemini(
@@ -794,9 +946,10 @@ def check_video_keyword_relevance_gemini(
     raw_item: Optional[dict] = None,
     model_name: Optional[str] = None,
     on_status: Optional[Callable[[str, str], None]] = None,
-) -> tuple[bool, str]:
-    """用 Gemini 看视频判定是否与关键词相关。"""
-    prompt = build_keyword_relevance_prompt(search_keyword)
+    lenient: bool = False,
+) -> tuple[bool, bool, str]:
+    """用 Gemini 看视频判定：关键词相关性 + 是否全篇 AI。返回 (relevant, fully_ai, reason)。"""
+    prompt = build_keyword_relevance_prompt(search_keyword, lenient=lenient)
     video_file = None
     compressed_path = None
     is_temp_compressed = False
@@ -811,7 +964,7 @@ def check_video_keyword_relevance_gemini(
         video_file = upload_and_wait_active(upload_path, on_status=on_status)
         if on_status:
             on_status(
-                "Gemini 判定视频与关键词相关性...",
+                "Gemini 判定视频相关性及 AI 类型...",
                 f"关键词：{search_keyword.strip()} · 前 {RELEVANCE_CLIP_SECONDS}s",
             )
         _, response = _generate_hook_content_with_models(
@@ -820,11 +973,12 @@ def check_video_keyword_relevance_gemini(
             model_name=model_name,
             on_status=on_status,
         )
-        relevant, reason = parse_keyword_relevance_response(response.text or "")
+        relevant, fully_ai, reason = parse_keyword_relevance_response(response.text or "")
+        if fully_ai is None:
+            fully_ai = False
         if relevant is None:
-            ok = _ad_matches_keyword(raw_item or {}, search_keyword)
-            return ok, "Gemini 未返回明确结论，已回退文案匹配"
-        return relevant, reason
+            return True, False, "Meta 关键词搜索结果，默认通过"
+        return relevant, fully_ai, reason
     finally:
         if video_file is not None:
             try:
@@ -848,23 +1002,126 @@ def _safe_remove_file(path: str) -> None:
 
 def _format_fetch_failure_diagnosis(stats: dict) -> str:
     """生成检索失败时的详细诊断文案。"""
+    pool_size = stats.get("unique_video_candidates", stats.get("keyword_matched", 0))
     lines = [
         f"Apify 共返回 {stats.get('total_raw_items', stats.get('total_items', 0))} 条广告",
-        f"候选池可用 {stats.get('keyword_matched', 0)} 条（近 {stats.get('lookback_days', FETCH_LOOKBACK_DAYS)} 天 · 含视频）",
+        f"去重后独立视频候选 {pool_size} 条",
         f"已尝试下载验证 {stats.get('candidates_tried', 0)} 条",
-        f"剔除 AI {stats.get('ai_filtered', 0)} · 超 {MAX_VIDEO_DURATION_SEC}s {stats.get('duration_filtered', 0)} · "
+        f"剔除全篇AI {stats.get('ai_filtered', 0)} · 超 {MAX_VIDEO_DURATION_SEC}s {stats.get('duration_filtered', 0)} · "
         f"内容不相关 {stats.get('relevance_rejected', 0)} · 下载失败 {stats.get('download_failed', 0)} · "
         f"Gemini 校验失败 {stats.get('gemini_check_failed', 0)}",
     ]
     if stats.get("outside_lookback") or stats.get("no_video") or stats.get("no_start_date"):
         lines.append(
-            f"预处理排除：无视频 {stats.get('no_video', 0)} · "
+            f"最近一轮预处理排除：无视频 {stats.get('no_video', 0)} · "
             f"无开始日期 {stats.get('no_start_date', 0)} · "
-            f"超出 {stats.get('lookback_days', FETCH_LOOKBACK_DAYS)} 天 {stats.get('outside_lookback', 0)}"
+            f"超出时间窗 {stats.get('outside_lookback', 0)}"
+            f"（近 {stats.get('lookback_days', FETCH_LOOKBACK_DAYS)} 天）"
         )
     if stats.get("keyword_rejected"):
         lines.append(f"文案二次过滤 {stats.get('keyword_rejected', 0)} 条")
+    stages = stats.get("lookback_stages_used")
+    if stages:
+        lines.append(f"已尝试时间窗（天）: {', '.join(str(d) for d in stages)} · Apify 轮次 {stats.get('fetch_rounds', 0)}")
+    if stats.get("fallback_filled"):
+        lines.append(f"信任 Meta 搜索补齐 {stats.get('fallback_count', 0)} 条（跳过 Gemini 二次验证）")
+    if stats.get("unique_video_candidates"):
+        lines.append(f"去重后独立视频候选 {stats.get('unique_video_candidates')} 条")
     return "\n".join(f"- {line}" for line in lines)
+
+
+def _merge_impression_pool(pool: dict[str, dict], candidates: list[dict]) -> int:
+    """按 video_url 合并候选，保留曝光最高的一条。返回新增 URL 数。"""
+    new_count = 0
+    for ad in candidates:
+        vurl = ad.get("video_url") or ""
+        if not vurl:
+            continue
+        prev = pool.get(vurl)
+        if prev is None:
+            new_count += 1
+            pool[vurl] = ad
+        elif ad.get("impression_score", -1) > prev.get("impression_score", -1):
+            pool[vurl] = ad
+    return new_count
+
+
+def _try_select_video_candidate(
+    ad: dict,
+    *,
+    slot: int,
+    keyword: str,
+    gemini_model: str,
+    validation_stats: dict,
+    require_gemini: bool,
+    gemini_lenient: bool,
+    on_progress: Optional[Callable[[float, str, str], None]] = None,
+    ratio: float = 0.5,
+) -> Optional[dict]:
+    """下载并验证单条候选；成功返回 selected 条目，失败返回 None。"""
+    brand_name = _extract_brand_name(ad.get("raw") or {})
+    if on_progress:
+        on_progress(
+            ratio,
+            f"[{slot}] 下载并验证候选视频",
+            f"{brand_name} · {'Gemini验证' if require_gemini else '信任Meta搜索补齐'}",
+        )
+
+    local_path = ""
+    try:
+        local_path = download_video(ad["video_url"], slot)
+    except Exception:
+        validation_stats["download_failed"] += 1
+        return None
+
+    duration_sec = _get_video_duration_seconds(local_path)
+    if duration_sec > MAX_VIDEO_DURATION_SEC:
+        validation_stats["duration_filtered"] += 1
+        _safe_remove_file(local_path)
+        return None
+
+    reason = "Meta 关键词搜索（信任模式补齐）"
+    if require_gemini:
+        def _rel_status(msg: str, detail: str = ""):
+            if on_progress:
+                on_progress(ratio + 0.02, msg, detail)
+
+        use_lenient = gemini_lenient or validation_stats["relevance_rejected"] >= 1
+        try:
+            relevant, fully_ai, reason = check_video_keyword_relevance_gemini(
+                local_path,
+                keyword,
+                raw_item=ad.get("raw") or {},
+                model_name=gemini_model,
+                on_status=_rel_status,
+                lenient=use_lenient,
+            )
+        except Exception as gemini_exc:
+            validation_stats["gemini_check_failed"] += 1
+            if TRUST_META_ON_GEMINI_FAILURE:
+                reason = f"Gemini 校验异常，信任 Meta 关键词搜索（{gemini_exc}）"
+            else:
+                _safe_remove_file(local_path)
+                return None
+        else:
+            if fully_ai:
+                validation_stats["ai_filtered"] += 1
+                _safe_remove_file(local_path)
+                return None
+            if not relevant:
+                validation_stats["relevance_rejected"] += 1
+                _safe_remove_file(local_path)
+                return None
+
+    return {
+        "index": slot,
+        "brand_name": brand_name,
+        "start_date": ad.get("start_date", ""),
+        "video_url": ad["video_url"],
+        "local_path": local_path,
+        "raw": ad.get("raw") or {},
+        "relevance_reason": reason,
+    }
 
 
 def collect_validated_top_videos(
@@ -878,7 +1135,7 @@ def collect_validated_top_videos(
     gemini_model: str = "",
     on_progress: Optional[Callable[[float, str, str], None]] = None,
 ) -> tuple[list, dict]:
-    """抓取 → 下载 → 时长/AI/关键词过滤 → Gemini 视频内容验证，直到凑满 top_n。"""
+    """抓取 → 下载 → 时长/Gemini 验证；凑不满 top_n 时信任 Meta 搜索补齐。"""
     keyword = (search_keyword or "").strip()
     if not gemini_api_key.strip():
         raise RuntimeError("检索验证需要 Gemini API Key（用于判断视频内容与关键词是否相关）")
@@ -886,129 +1143,175 @@ def collect_validated_top_videos(
     configure_gemini_client(gemini_api_key, gemini_proxy, model=gemini_model)
 
     selected: list[dict] = []
+    selected_video_urls: set[str] = set()
     excluded_ad_ids: set[str] = set()
+    strict_tried_urls: set[str] = set()
+    impression_pool: dict[str, dict] = {}
     validation_stats = {
         "duration_filtered": 0,
         "relevance_rejected": 0,
+        "ai_filtered": 0,
         "download_failed": 0,
         "gemini_check_failed": 0,
         "candidates_tried": 0,
         "fetch_rounds": 0,
         "total_raw_items": 0,
+        "lookback_stages_used": [],
+        "fallback_filled": False,
+        "fallback_count": 0,
+        "unique_video_candidates": 0,
     }
     last_rank_stats: dict = {}
-    search_type: Optional[str] = None
 
     def _progress(ratio: float, step: str, detail: str = ""):
         if on_progress:
             on_progress(ratio, step, detail)
 
-    results_limit = RESULTS_LIMIT
-    candidate_pool: list[dict] = []
+    search_modes = ["keyword_unordered", "keyword_exact_phrase"]
 
-    while len(selected) < top_n and validation_stats["fetch_rounds"] < MAX_FETCH_ROUNDS:
-        validation_stats["fetch_rounds"] += 1
-        round_no = validation_stats["fetch_rounds"]
-        if round_no > 1 and not candidate_pool:
-            search_type = "keyword_unordered"
-        _progress(
-            0.08 + 0.12 * (round_no - 1),
-            f"Apify 抓取候选池（第 {round_no} 轮）",
-            f"关键词：{keyword} · 上限 {results_limit} 条"
-            + (f" · 搜索模式 {search_type}" if search_type else ""),
-        )
-        raw_items = fetch_fb_ads(
-            apify_token,
-            keyword,
-            country,
-            results_limit=results_limit,
-            search_type=search_type,
-        )
-        validation_stats["total_raw_items"] += len(raw_items)
-        candidates, rank_stats = rank_video_ad_candidates(
-            raw_items,
-            keyword,
-            exclude_ad_ids=excluded_ad_ids,
-            require_keyword_in_text=False,
-        )
-        last_rank_stats = rank_stats
-        if candidates:
-            seen_urls = {ad["video_url"] for ad in candidate_pool}
-            for ad in candidates:
-                if ad["video_url"] not in seen_urls:
-                    candidate_pool.append(ad)
-                    seen_urls.add(ad["video_url"])
-
-        if not candidate_pool:
-            break
-
-        pool_index = validation_stats["candidates_tried"]
-        while len(selected) < top_n and pool_index < len(candidate_pool):
-            ad = candidate_pool[pool_index]
-            pool_index += 1
-            validation_stats["candidates_tried"] = pool_index
-
-            ad_id = ad.get("ad_id") or ""
-            if ad_id:
-                excluded_ad_ids.add(ad_id)
-
-            brand_name = _extract_brand_name(ad.get("raw") or {})
-            slot = len(selected) + 1
-            ratio = 0.25 + min(0.65, 0.65 * pool_index / max(len(candidate_pool), top_n * 3))
-            _progress(
-                ratio,
-                f"[{slot}/{top_n}] 下载并验证候选视频",
-                f"{brand_name} · 候选 #{pool_index}",
-            )
-
-            local_path = ""
-            try:
-                local_path = download_video(ad["video_url"], slot)
-            except Exception:
-                validation_stats["download_failed"] += 1
-                continue
-
-            duration_sec = _get_video_duration_seconds(local_path)
-            if duration_sec > MAX_VIDEO_DURATION_SEC:
-                validation_stats["duration_filtered"] += 1
-                _safe_remove_file(local_path)
-                continue
-
-            def _rel_status(msg: str, detail: str = ""):
-                _progress(ratio + 0.02, msg, detail)
-
-            try:
-                relevant, reason = check_video_keyword_relevance_gemini(
-                    local_path,
-                    keyword,
-                    raw_item=ad.get("raw") or {},
-                    model_name=gemini_model,
-                    on_status=_rel_status,
-                )
-            except Exception:
-                validation_stats["gemini_check_failed"] += 1
-                _safe_remove_file(local_path)
-                continue
-            if not relevant:
-                validation_stats["relevance_rejected"] += 1
-                _safe_remove_file(local_path)
-                continue
-
-            selected.append(
-                {
-                    "index": slot,
-                    "brand_name": brand_name,
-                    "start_date": ad["start_date"],
-                    "video_url": ad["video_url"],
-                    "local_path": local_path,
-                    "raw": ad.get("raw") or {},
-                    "relevance_reason": reason,
-                }
-            )
-
+    for stage_idx, lookback_days in enumerate(FETCH_LOOKBACK_STAGES):
         if len(selected) >= top_n:
             break
-        results_limit = min(results_limit + 100, 400)
+
+        if stage_idx > 0:
+            prev_days = FETCH_LOOKBACK_STAGES[stage_idx - 1]
+            _progress(
+                0.06 + 0.04 * stage_idx,
+                f"近 {prev_days} 天仅 {len(selected)}/{top_n} 条，放宽至 {lookback_days} 天",
+                f"关键词：{keyword}",
+            )
+
+        validation_stats["lookback_stages_used"].append(lookback_days)
+        results_limit = RESULTS_LIMIT
+        allow_missing_start = True
+        gemini_lenient = lookback_days > FETCH_LOOKBACK_DAYS
+
+        for fetch_round in range(1, MAX_FETCH_ROUNDS + 1):
+            if len(selected) >= top_n:
+                break
+
+            validation_stats["fetch_rounds"] += 1
+            round_no = validation_stats["fetch_rounds"]
+            search_type = search_modes[(fetch_round - 1) % len(search_modes)]
+            apply_date_filter = fetch_round == 1
+            if fetch_round > 1:
+                apply_date_filter = False
+                results_limit = min(results_limit + 100, 500)
+
+            _progress(
+                0.08 + 0.12 * min(round_no - 1, 8),
+                f"Apify 抓取候选池（近 {lookback_days} 天 · 第 {round_no} 轮）",
+                f"关键词：{keyword} · 上限 {results_limit} 条 · {search_type}"
+                + (" · 宽松 Gemini" if gemini_lenient else ""),
+            )
+            raw_items = fetch_fb_ads(
+                apify_token,
+                keyword,
+                country,
+                results_limit=results_limit,
+                search_type=search_type,
+                lookback_days=lookback_days,
+                apply_date_filter=apply_date_filter,
+            )
+            validation_stats["total_raw_items"] += len(raw_items)
+            # URL 已带日期过滤时不再用 start_date 二次剔除（字段常与 Meta 页面不一致）
+            candidates, rank_stats = rank_video_ad_candidates(
+                raw_items,
+                keyword,
+                lookback_days=lookback_days,
+                exclude_ad_ids=excluded_ad_ids,
+                exclude_video_urls=selected_video_urls,
+                require_keyword_in_text=False,
+                allow_missing_start_date=allow_missing_start,
+                enforce_lookback=not apply_date_filter,
+            )
+            last_rank_stats = rank_stats
+            new_in_round = _merge_impression_pool(impression_pool, candidates)
+            validation_stats["unique_video_candidates"] = len(impression_pool)
+
+            ordered = _sort_pool_for_selection(impression_pool, keyword, lookback_days)
+            new_strict_tried = 0
+            for ad in ordered:
+                if len(selected) >= top_n:
+                    break
+                vurl = ad.get("video_url") or ""
+                if not vurl or vurl in selected_video_urls or vurl in strict_tried_urls:
+                    continue
+                strict_tried_urls.add(vurl)
+                validation_stats["candidates_tried"] += 1
+                new_strict_tried += 1
+
+                ad_id = ad.get("ad_id") or ""
+                if ad_id:
+                    excluded_ad_ids.add(ad_id)
+
+                slot = len(selected) + 1
+                ratio = 0.25 + min(0.55, 0.55 * validation_stats["candidates_tried"] / max(len(impression_pool), top_n * 4))
+                picked = _try_select_video_candidate(
+                    ad,
+                    slot=slot,
+                    keyword=keyword,
+                    gemini_model=gemini_model,
+                    validation_stats=validation_stats,
+                    require_gemini=True,
+                    gemini_lenient=gemini_lenient,
+                    on_progress=_progress,
+                    ratio=ratio,
+                )
+                if picked:
+                    selected.append(picked)
+                    selected_video_urls.add(vurl)
+
+            if len(selected) >= top_n:
+                break
+            # 候选池里还有未尝试的视频时，先不发起下一轮 Apify
+            untried_in_pool = sum(
+                1
+                for ad in impression_pool.values()
+                if (ad.get("video_url") or "") not in strict_tried_urls
+                and (ad.get("video_url") or "") not in selected_video_urls
+            )
+            if untried_in_pool > 0:
+                continue
+            if new_in_round == 0 and new_strict_tried == 0:
+                break
+
+    if len(selected) < top_n and FALLBACK_TRUST_META_SEARCH and impression_pool:
+        validation_stats["fallback_filled"] = True
+        _progress(
+            0.82,
+            f"严格筛选仅 {len(selected)}/{top_n} 条，信任 Meta 搜索补齐",
+            f"候选池 {len(impression_pool)} 个独立视频",
+        )
+        ordered = sorted(
+            impression_pool.values(),
+            key=lambda ad: -ad.get("impression_score", -1),
+        )
+        for ad in ordered:
+            if len(selected) >= top_n:
+                break
+            vurl = ad.get("video_url") or ""
+            if not vurl or vurl in selected_video_urls:
+                continue
+            slot = len(selected) + 1
+            picked = _try_select_video_candidate(
+                ad,
+                slot=slot,
+                keyword=keyword,
+                gemini_model=gemini_model,
+                validation_stats=validation_stats,
+                require_gemini=False,
+                gemini_lenient=True,
+                on_progress=_progress,
+                ratio=0.86,
+            )
+            if picked:
+                selected.append(picked)
+                selected_video_urls.add(vurl)
+                validation_stats["fallback_count"] += 1
+
+    for idx, item in enumerate(selected, start=1):
+        item["index"] = idx
 
     combined_stats = {**last_rank_stats, **validation_stats, "selected": len(selected)}
     return selected, combined_stats
@@ -1277,6 +1580,7 @@ GEMINI_UPLOAD_URL = f"https://{GEMINI_API_HOST}/upload/v1beta/files"
 GEMINI_API_BASE_URL = f"https://{GEMINI_API_HOST}/v1beta"
 COMMON_LOCAL_PROXY_PORTS = (7897, 7890, 1087, 10808, 1080, 8080, 33210, 6152)
 GEMINI_PROXY_SESSION_KEY = "gemini_proxy_resolved"
+APIFY_TOKEN_SESSION_KEY = "apify_token_field"
 GEMINI_PROXY_SOURCE_KEY = "gemini_proxy_source"
 LAST_EXPORT_KEY = "last_export_bundle"
 _GEMINI_RUNTIME: dict[str, str] = {"api_key": "", "proxy": "", "model": ""}
@@ -3818,533 +4122,536 @@ def send_export_email(
         return False, f"❌ 邮件发送失败：{e}"
 
 
-# ------------------------------------------------------------------
-# 侧边栏 — 模块一
-# ------------------------------------------------------------------
-with st.sidebar:
-    st.header("🔑 全局配置")
-    apify_token = st.text_input(
-        "Apify API Token",
-        type="password",
-        help="也可在 .streamlit/secrets.toml 中预填 [apify] token",
-    )
-    st.markdown("---")
-    _auto_proxy, _auto_proxy_source = init_gemini_proxy_for_session()
-    with st.expander("🎬 Gemini 视频模式（检索验证 + 浅捞必填）", expanded=False):
-        gemini_api_key = st.text_input(
-            "Google Gemini API Key",
-            type="password",
-            help="步骤①检索需用 Gemini 验证视频与关键词是否相关；步骤②浅捞识别 Hook 列。也可在 secrets.toml 预填。",
-        )
-
-        _model_options = get_gemini_video_model_options()
-        _model_ids = [item["id"] for item in _model_options]
-        _default_model = (_secret("gemini", "model", GEMINI_MODEL) or GEMINI_MODEL).strip()
-        if not _is_capable_gemini_video_model(_default_model) or _default_model not in _model_ids:
-            _default_model = GEMINI_MODEL
-        if GEMINI_MODEL_SESSION_KEY not in st.session_state:
-            st.session_state[GEMINI_MODEL_SESSION_KEY] = _default_model
-        elif st.session_state.get(GEMINI_MODEL_SESSION_KEY) not in _model_ids:
-            st.session_state[GEMINI_MODEL_SESSION_KEY] = _default_model
-
-        gemini_model = st.selectbox(
-            "Gemini 视频模型",
-            options=_model_ids,
-            format_func=get_gemini_model_label,
-            key=GEMINI_MODEL_SESSION_KEY,
-            help="仅列出当前 API 可用的视频模型（1.5 / 2.0 已下线）",
-        )
-
-        auto_proxy, auto_source = _auto_proxy, _auto_proxy_source
-        if "gemini_proxy_field" not in st.session_state:
-            st.session_state.gemini_proxy_field = auto_proxy or _secret("gemini", "proxy_url")
-
-        col_proxy, col_redetect = st.columns([3, 1])
-        with col_proxy:
-            gemini_proxy = st.text_input(
-                "HTTPS 代理",
-                key="gemini_proxy_field",
-                placeholder="启动时自动检测，如 http://127.0.0.1:7897",
-                help="每次打开页面会自动探测系统代理 / 常见本地端口；可手动修改",
-            )
-        with col_redetect:
-            st.write("")
-            st.write("")
-            st.button(
-                "🔄",
-                help="重新检测代理",
-                key="redetect_gemini_proxy",
-                on_click=_on_redetect_gemini_proxy,
-            )
-
-        if gemini_proxy:
-            apply_gemini_proxy(gemini_proxy)
-        elif auto_proxy:
-            apply_gemini_proxy(auto_proxy)
-
-        if auto_source:
-            if auto_proxy:
-                st.caption(f"✅ 已自动配置：`{auto_proxy}`（来源：{auto_source}）")
-            else:
-                st.caption(f"⚠️ {auto_source}。请开启 Clash/VPN 后点 🔄 重新检测。")
-
-        if st.button("🔌 测试 Gemini 连接", use_container_width=True, key="test_gemini"):
-            ok, err = check_gemini_connectivity(gemini_proxy or auto_proxy)
-            if ok:
-                st.success("✅ 可以连接 generativelanguage.googleapis.com")
-            else:
-                st.error(f"❌ {err}")
-        st.caption(
-            f"当前模型：`{gemini_model}` · "
-            f"前 {GEMINI_HOOK_CLIP_SECONDS}s · HookVO=台词 / Text Hook=字幕 · "
-            f"压缩 {GEMINI_VIDEO_MAX_HEIGHT}p · 已排除 Lite 弱模型"
-        )
-    st.markdown("---")
-    with st.expander("📧 发邮件配置（可选）", expanded=False):
-        smtp_host = st.text_input("SMTP 服务器", value=_secret("email", "smtp_host", "smtp.gmail.com"))
-        smtp_port = st.text_input("SMTP 端口", value=_secret("email", "smtp_port", "587"))
-        smtp_user = st.text_input("发件邮箱", value=_secret("email", "smtp_user"))
-        if "smtp_password_field" not in st.session_state:
-            st.session_state.smtp_password_field = _secret("email", "smtp_password")
-        smtp_password = st.text_input(
-            "邮箱密码 / 应用专用密码",
-            type="password",
-            key="smtp_password_field",
-        )
-        smtp_from_name = st.text_input("发件人名称", value=_secret("email", "from_name", "FB广告库浅捞工具"))
-        default_recipients = _secret("email", "default_recipients")
-        st.caption("Gmail：端口 587 + 应用专用密码；SSL 端口 465 也支持。可在 secrets.toml 的 [email] 预填。")
-    st.markdown("---")
-    st.caption("提示：密钥仅在本次会话中使用；侧边栏留空时会尝试读取 secrets.toml。")
-
-st.title("🎬 FB 广告库浅捞工具")
-st.caption("① 广告库捞视频 → ② 本地免费填表（默认零 Token）→ 打包 / 发邮件")
-
-tab_fetch, tab_analyze = st.tabs(["① 捞视频下载", "② 上传视频浅捞"])
-
-# ==================================================================
-# 步骤①：Apify 抓取 + 下载 + Gemini 内容相关性验证
-# ==================================================================
-with tab_fetch:
-    col_kw, col_country = st.columns([2, 1])
-    with col_kw:
-        search_keyword = st.text_input(
-            "广告库搜索关键词",
-            placeholder="例如：laundry detergent、shapewear、pet food",
-            help=(
-                "Meta Ad Library 精确关键词搜索 · 剔除 AI 视频 · 时长≤60s · "
-                f"Gemini 验证视频内容与关键词相关 · 近 {FETCH_LOOKBACK_DAYS} 天 · 曝光 Top 3"
-            ),
-            key="fetch_keyword",
-        )
-    with col_country:
-        country = st.selectbox(
-            "投放国家/地区",
-            options=["ALL", "US", "GB", "CA", "AU", "DE", "FR", "JP", "SG"],
-            key="fetch_country",
-        )
-
-    fetch_button = st.button(
-        f"📥 智能检索 Top 3（关键词相关 · 非AI · ≤60s）",
-        type="primary",
-        use_container_width=True,
-    )
-
-    if fetch_button:
-        clear_export_bundle()
-        apify_token = apify_token.strip() or _secret("apify", "token")
-        if not apify_token:
-            st.error("请先在侧边栏填写 Apify API Token。")
-            st.stop()
-        effective_gemini_key = (gemini_api_key or "").strip() or _secret("gemini", "api_key")
-        if not effective_gemini_key:
-            st.error(
-                "检索验证需要 Gemini API Key（用于判断视频内容与关键词是否相关）。"
-                "请在侧边栏 Gemini 区域填写，或在 Secrets 中配置 [gemini] api_key。"
-            )
-            st.stop()
-        if not search_keyword.strip():
-            st.error("请输入广告库搜索关键词。")
-            st.stop()
-
-        effective_gemini_proxy = (
-            gemini_proxy.strip()
-            or st.session_state.get(GEMINI_PROXY_SESSION_KEY, "")
-            or _auto_proxy
-        )
-        ok, conn_err = check_gemini_connectivity(effective_gemini_proxy)
-        if not ok:
-            st.error(f"❌ 无法连接 Gemini API：{conn_err}")
-            st.stop()
-
-        cleanup_fetched_batch(st.session_state.get("fetched_batch"))
-        progress = FetchProgress(TOP_N)
-        progress.set_step(0, "Apify 抓取 + Gemini 内容验证，通常需 3~10 分钟")
-
-        try:
-            def _fetch_progress(ratio: float, step: str, detail: str = ""):
-                if ratio < 0.35:
-                    progress.set_step(0, detail or step)
-                elif ratio < 0.85:
-                    progress.set_step(1, detail or step)
+def render_fb_competitor_tool(*, embedded: bool = False) -> None:
+    # ------------------------------------------------------------------
+    # 侧边栏 — 模块一
+    # ------------------------------------------------------------------
+    if not embedded:
+        with st.sidebar:
+                st.header("🔑 全局配置")
+                if APIFY_TOKEN_SESSION_KEY not in st.session_state:
+                    st.session_state[APIFY_TOKEN_SESSION_KEY] = _secret("apify", "token")
+                apify_token = st.text_input(
+                    "Apify API Token",
+                    type="password",
+                    help="在 Apify → Settings → Integrations 获取。也可在 Streamlit Secrets 配置 [apify] token",
+                    key=APIFY_TOKEN_SESSION_KEY,
+                )
+                _secret_apify = _sanitize_apify_token(_secret("apify", "token"))
+                if _secret_apify:
+                    st.caption("✅ Secrets 中已配置 Apify Token")
+                elif (apify_token or "").strip():
+                    st.caption("✅ 使用侧边栏填写的 Apify Token")
                 else:
-                    progress.set_step(2, detail or step)
-                progress.update(ratio, step, detail)
+                    st.caption("⚠️ 未配置 Apify Token")
+                st.markdown("---")
+                _auto_proxy, _auto_proxy_source = init_gemini_proxy_for_session()
+                with st.expander("🎬 Gemini 视频模式（检索验证 + 浅捞必填）", expanded=False):
+                    st.text_input(
+                        "Google Gemini API Key",
+                        type="password",
+                        key=SUITE_GEMINI_API_KEY,
+                        help="步骤①检索需用 Gemini 验证视频与关键词是否相关；步骤②浅捞识别 Hook 列。也可在 secrets.toml 预填。",
+                    )
+        
+                    _model_options = get_gemini_video_model_options()
+                    _model_ids = [item["id"] for item in _model_options]
+                    _default_model = (_secret("gemini", "model", GEMINI_MODEL) or GEMINI_MODEL).strip()
+                    if not _is_capable_gemini_video_model(_default_model) or _default_model not in _model_ids:
+                        _default_model = GEMINI_MODEL
+                    if GEMINI_MODEL_SESSION_KEY not in st.session_state:
+                        st.session_state[GEMINI_MODEL_SESSION_KEY] = _default_model
+                    elif st.session_state.get(GEMINI_MODEL_SESSION_KEY) not in _model_ids:
+                        st.session_state[GEMINI_MODEL_SESSION_KEY] = _default_model
+        
+                    gemini_model = st.selectbox(
+                        "Gemini 视频模型",
+                        options=_model_ids,
+                        format_func=get_gemini_model_label,
+                        key=GEMINI_MODEL_SESSION_KEY,
+                        help="仅列出当前 API 可用的视频模型（1.5 / 2.0 已下线）",
+                    )
+        
+                    auto_proxy, auto_source = _auto_proxy, _auto_proxy_source
+                    if "gemini_proxy_field" not in st.session_state:
+                        st.session_state.gemini_proxy_field = auto_proxy or _secret("gemini", "proxy_url")
+        
+                    col_proxy, col_redetect = st.columns([3, 1])
+                    with col_proxy:
+                        gemini_proxy = st.text_input(
+                            "HTTPS 代理",
+                            key="gemini_proxy_field",
+                            placeholder="启动时自动检测，如 http://127.0.0.1:7897",
+                            help="每次打开页面会自动探测系统代理 / 常见本地端口；可手动修改",
+                        )
+                    with col_redetect:
+                        st.write("")
+                        st.write("")
+                        st.button(
+                            "🔄",
+                            help="重新检测代理",
+                            key="redetect_gemini_proxy",
+                            on_click=_on_redetect_gemini_proxy,
+                        )
+        
+                    if gemini_proxy:
+                        apply_gemini_proxy(gemini_proxy)
+                    elif auto_proxy:
+                        apply_gemini_proxy(auto_proxy)
+        
+                    if auto_source:
+                        if auto_proxy:
+                            st.caption(f"✅ 已自动配置：`{auto_proxy}`（来源：{auto_source}）")
+                        else:
+                            st.caption(f"⚠️ {auto_source}。请开启 Clash/VPN 后点 🔄 重新检测。")
+        
+                    if st.button("🔌 测试 Gemini 连接", use_container_width=True, key="test_gemini"):
+                        ok, err = check_gemini_connectivity(gemini_proxy or auto_proxy)
+                        if ok:
+                            st.success("✅ 可以连接 generativelanguage.googleapis.com")
+                        else:
+                            st.error(f"❌ {err}")
+                    st.caption(
+                        f"当前模型：`{gemini_model}` · "
+                        f"前 {GEMINI_HOOK_CLIP_SECONDS}s · HookVO=台词 / Text Hook=字幕 · "
+                        f"压缩 {GEMINI_VIDEO_MAX_HEIGHT}p · 已排除 Lite 弱模型"
+                    )
+                st.markdown("---")
+                with st.expander("📧 发邮件配置（可选）", expanded=False):
+                    if SUITE_SMTP_HOST not in st.session_state:
+                        st.session_state[SUITE_SMTP_HOST] = _secret("email", "smtp_host", "smtp.gmail.com")
+                    if SUITE_SMTP_PORT not in st.session_state:
+                        st.session_state[SUITE_SMTP_PORT] = _secret("email", "smtp_port", "587")
+                    if SUITE_SMTP_USER not in st.session_state:
+                        st.session_state[SUITE_SMTP_USER] = _secret("email", "smtp_user")
+                    if SUITE_SMTP_PASSWORD not in st.session_state:
+                        st.session_state[SUITE_SMTP_PASSWORD] = _secret("email", "smtp_password")
+                    if SUITE_SMTP_FROM_NAME not in st.session_state:
+                        st.session_state[SUITE_SMTP_FROM_NAME] = _secret("email", "from_name", "FB广告库浅捞工具")
+                    st.text_input("SMTP 服务器", key=SUITE_SMTP_HOST)
+                    st.text_input("SMTP 端口", key=SUITE_SMTP_PORT)
+                    st.text_input("发件邮箱", key=SUITE_SMTP_USER)
+                    st.text_input(
+                        "邮箱密码 / 应用专用密码",
+                        type="password",
+                        key=SUITE_SMTP_PASSWORD,
+                    )
+                    st.text_input("发件人名称", key=SUITE_SMTP_FROM_NAME)
+                    default_recipients = _secret("email", "default_recipients")
+                    st.caption("Gmail：端口 587 + 应用专用密码；SSL 端口 465 也支持。可在 secrets.toml 的 [email] 预填。")
+                st.markdown("---")
+                st.caption("提示：密钥仅在本次会话中使用；侧边栏留空时会尝试读取 secrets.toml。")
 
-            downloaded_ads, kw_stats = collect_validated_top_videos(
-                apify_token,
-                search_keyword.strip(),
-                country,
-                top_n=TOP_N,
-                gemini_api_key=effective_gemini_key,
-                gemini_proxy=effective_gemini_proxy,
-                gemini_model=resolve_gemini_model(gemini_model),
-                on_progress=_fetch_progress,
+    apify_token = st.session_state.get(APIFY_TOKEN_SESSION_KEY, "") or _secret("apify", "token")
+    gemini_api_key = get_gemini_api_key()
+    _auto_proxy, _auto_proxy_source = init_gemini_proxy_for_session()
+    gemini_proxy = (
+        st.session_state.get("gemini_proxy_field", "")
+        or st.session_state.get(GEMINI_PROXY_SESSION_KEY, "")
+        or _auto_proxy
+        or _secret("gemini", "proxy_url")
+    )
+    gemini_model = st.session_state.get(GEMINI_MODEL_SESSION_KEY) or _secret("gemini", "model", GEMINI_MODEL) or GEMINI_MODEL
+    smtp_host = st.session_state.get(SUITE_SMTP_HOST, _secret("email", "smtp_host", "smtp.gmail.com"))
+    smtp_port = st.session_state.get(SUITE_SMTP_PORT, _secret("email", "smtp_port", "587"))
+    smtp_user = st.session_state.get(SUITE_SMTP_USER, _secret("email", "smtp_user"))
+    smtp_password = st.session_state.get(SUITE_SMTP_PASSWORD, _secret("email", "smtp_password"))
+    smtp_from_name = st.session_state.get(SUITE_SMTP_FROM_NAME, _secret("email", "from_name", "FB广告库浅捞工具"))
+    default_recipients = _secret("email", "default_recipients")
+
+    if not embedded:
+        st.title("🎬 FB 广告库浅捞工具")
+        st.caption("① 广告库捞视频 → ② 本地免费填表（默认零 Token）→ 打包 / 发邮件")
+
+    tab_fetch, tab_analyze = st.tabs(["① 捞视频下载", "② 上传视频浅捞"])
+
+    # ==================================================================
+    # 步骤①：Apify 抓取 + 下载 + Gemini 内容相关性验证
+    # ==================================================================
+    with tab_fetch:
+        col_kw, col_country = st.columns([2, 1])
+        with col_kw:
+            search_keyword = st.text_input(
+                "广告库搜索关键词",
+                placeholder="例如：laundry detergent、shapewear、pet food",
+                help=(
+                    "Meta Ad Library 关键词搜索 · 优先近 7 天，不足 3 条自动放宽至 14/30/60 天 · "
+                    "剔除全篇 AI 视频（穿插 AI 片段可保留）· 时长≤60s · "
+                    "Gemini 验证视频内容与关键词相关 · 曝光 Top 3"
+                ),
+                key="fetch_keyword",
+            )
+        with col_country:
+            country = st.selectbox(
+                "投放国家/地区",
+                options=["ALL", "US", "GB", "CA", "AU", "DE", "FR", "JP", "SG"],
+                key="fetch_country",
             )
 
-            progress.complete_step(0)
-            progress.complete_step(1)
+        fetch_button = st.button(
+            f"📥 智能检索 Top 3（优先7天 · 相关 · 非全篇AI · ≤60s）",
+            type="primary",
+            use_container_width=True,
+        )
 
-            if not downloaded_ads:
-                st.warning(f"⚠️ 未能凑满 {TOP_N} 条符合要求的视频。")
-                with st.expander("查看筛选详情", expanded=True):
-                    st.markdown(_format_fetch_failure_diagnosis(kw_stats))
-                st.info(
-                    "常见原因：① 近 7 天内该关键词视频广告本身较少；② 视频下载失败；"
-                    "③ Gemini 判定内容与关键词无关。"
-                    "建议换更热门/更具体的关键词，或先在 Meta Ad Library 网页确认有足够视频。"
+        if fetch_button:
+            clear_export_bundle()
+            apify_token = _sanitize_apify_token(apify_token) or _sanitize_apify_token(_secret("apify", "token"))
+            if not apify_token:
+                st.error("请先在侧边栏填写 Apify API Token，或在 Streamlit Cloud Secrets 中配置 [apify] token。")
+                st.stop()
+            apify_ok, apify_err = check_apify_connectivity(apify_token)
+            if not apify_ok:
+                st.error(f"❌ Apify Token 校验失败：{apify_err}")
+                with st.expander("如何配置 Apify Token", expanded=True):
+                    st.markdown(_apify_auth_help_markdown())
+                st.stop()
+            effective_gemini_key = (gemini_api_key or "").strip() or _secret("gemini", "api_key")
+            if not effective_gemini_key:
+                st.error(
+                    "检索验证需要 Gemini API Key（用于判断视频内容与关键词是否相关）。"
+                    "请在侧边栏 Gemini 区域填写，或在 Secrets 中配置 [gemini] api_key。"
                 )
                 st.stop()
+            if not search_keyword.strip():
+                st.error("请输入广告库搜索关键词。")
+                st.stop()
 
-            if len(downloaded_ads) < TOP_N:
-                st.warning(
-                    f"⚠️ 仅找到 {len(downloaded_ads)}/{TOP_N} 条通过全部筛选的视频（"
-                    f"剔除 AI {kw_stats.get('ai_filtered', 0)} · "
-                    f"超时长 {kw_stats.get('duration_filtered', 0)} · "
-                    f"内容不相关 {kw_stats.get('relevance_rejected', 0)}）"
-                )
-
-            progress.update(
-                0.88,
-                "筛选完成",
-                f"候选 {kw_stats.get('candidates_tried', 0)} 条 · "
-                f"文案匹配 {kw_stats.get('keyword_matched', 0)} · "
-                f"剔除AI {kw_stats.get('ai_filtered', 0)} · "
-                f"最终 {len(downloaded_ads)} 条",
+            effective_gemini_proxy = (
+                gemini_proxy.strip()
+                or st.session_state.get(GEMINI_PROXY_SESSION_KEY, "")
+                or _auto_proxy
             )
+            ok, conn_err = check_gemini_connectivity(effective_gemini_proxy)
+            if not ok:
+                st.error(f"❌ 无法连接 Gemini API：{conn_err}")
+                st.stop()
 
-            progress.complete_step(2)
-            progress.set_step(3)
-            progress.update(0.9, "打包视频压缩包...")
-            zip_bytes, zip_name = build_videos_only_zip(
-                downloaded_ads, search_keyword.strip(), country
-            )
+            cleanup_fetched_batch(st.session_state.get("fetched_batch"))
+            progress = FetchProgress(TOP_N)
+            progress.set_step(0, "Apify 抓取 + Gemini 内容验证，通常需 3~10 分钟")
 
-            st.session_state["fetched_batch"] = {
-                "keyword": search_keyword.strip(),
-                "country": country,
-                "ads": downloaded_ads,
-            }
-            progress.finish()
-
-            video_source_payload = [
-                {
-                    "index": ad["index"],
-                    "local_path": ad["local_path"],
-                    "brand_name": ad.get("brand_name", ""),
-                    "start_date": ad.get("start_date", ""),
-                    "video_url": ad.get("video_url", ""),
-                    "raw": ad.get("raw") or {},
-                    "source_name": os.path.basename(ad["local_path"]) if ad.get("local_path") else "",
-                    "download_error": ad.get("download_error"),
-                }
-                for ad in downloaded_ads
-            ]
-            meta_results = build_local_analysis_results(
-                video_source_payload,
-                product_category=search_keyword.strip(),
-            )
-            meta_results = finalize_shallow_results(
-                meta_results,
-                expected_count=len(downloaded_ads),
-            )
-            full_zip_bytes, full_zip_name = build_export_zip(
-                meta_results, search_keyword.strip(), country
-            )
-            save_export_bundle(
-                meta_results,
-                full_zip_bytes,
-                full_zip_name,
-                search_keyword.strip(),
-                country,
-            )
-
-            st.success(f"✅ 已下载 {len(downloaded_ads)} 条视频。")
-            st.download_button(
-                "📥 下载完整包（浅捞表格 + 视频）",
-                data=full_zip_bytes,
-                file_name=full_zip_name,
-                mime="application/zip",
-                use_container_width=True,
-                key="fetch_full_zip",
-            )
-            st.download_button(
-                "📥 仅下载视频包（mp4 + 元数据.json）",
-                data=zip_bytes,
-                file_name=zip_name,
-                mime="application/zip",
-                use_container_width=True,
-                key="fetch_videos_only_zip",
-            )
-            st.caption(
-                "已用本地 ffmpeg + 规则推断填表（零 Token）。"
-                "Hook/场景等为算法推测，可在 Excel 中微调。"
-            )
-
-            st.subheader("已下载视频预览")
-            for ad in downloaded_ads:
-                st.markdown(f"**#{ad['index']} {ad['brand_name']}** · 开始投放：{ad['start_date']}")
-                if ad["local_path"] and os.path.exists(ad["local_path"]):
-                    st.video(ad["local_path"])
-                st.caption(ad["video_url"])
-
-        except Exception as e:
-            st.error(f"❌ 抓取失败：{e}")
-            st.code(traceback.format_exc())
-
-    elif st.session_state.get("fetched_batch"):
-        batch = st.session_state["fetched_batch"]
-        st.info(
-            f"当前会话已有下载批次：关键词「{batch.get('keyword')}」· "
-            f"{len(batch.get('ads', []))} 条视频。可在步骤②上传或直接使用。"
-        )
-        for ad in batch.get("ads", []):
-            st.markdown(f"**#{ad['index']} {ad.get('brand_name', '')}**")
-            if ad.get("local_path") and os.path.exists(ad["local_path"]):
-                st.video(ad["local_path"])
-
-    fetch_bundle = get_export_bundle()
-    if fetch_bundle and fetch_bundle.get("zip_bytes"):
-        st.markdown("---")
-        render_export_download_section(
-            fetch_bundle.get("results") or [],
-            fetch_bundle.get("zip_bytes") or b"",
-            fetch_bundle.get("zip_filename") or "export.zip",
-            fetch_bundle.get("keyword") or "",
-            fetch_bundle.get("country") or "ALL",
-            default_recipients=default_recipients,
-            smtp_host=smtp_host,
-            smtp_port=smtp_port,
-            smtp_user=smtp_user,
-            smtp_password=smtp_password,
-            smtp_from_name=smtp_from_name,
-            key_prefix="fetch",
-        )
-with tab_analyze:
-    st.markdown(
-        "将步骤①下载的视频（或任意 mp4）生成浅捞表格。"
-        " **默认「本地免费填表」：零 Token，不上传视频。**"
-    )
-
-    batch = st.session_state.get("fetched_batch")
-    use_server_videos = False
-    if batch and batch.get("ads"):
-        use_server_videos = st.checkbox(
-            "直接使用步骤①已下载的视频（跳过上传）",
-            value=True,
-            help="若你已在步骤①下载，可勾选此项免去重新上传。",
-        )
-
-    uploaded_files = None
-    if not use_server_videos:
-        uploaded_files = st.file_uploader(
-            "上传视频文件（mp4，最多 3 个，按顺序对应视频编号 1~3）",
-            type=["mp4"],
-            accept_multiple_files=True,
-        )
-        if uploaded_files and len(uploaded_files) > TOP_N:
-            st.warning(f"最多处理 {TOP_N} 个视频，将只取前 {TOP_N} 个。")
-            uploaded_files = uploaded_files[:TOP_N]
-
-    analyze_keyword = st.text_input(
-        "批次标签 / 搜索关键词（用于打包文件名 & 商品类目）",
-        value=(batch or {}).get("keyword", ""),
-        placeholder="可与步骤①一致，或自行填写",
-        key="analyze_keyword",
-    )
-    _country_options = ["ALL", "US", "GB", "CA", "AU", "DE", "FR", "JP", "SG"]
-    _default_country = (batch or {}).get("country", "ALL")
-    analyze_country = st.selectbox(
-        "地区标签",
-        options=_country_options,
-        index=_country_options.index(_default_country) if _default_country in _country_options else 0,
-        key="analyze_country",
-    )
-
-    analyze_mode = st.radio(
-        "分析方式",
-        options=["local", "gemini"],
-        index=0,
-        format_func=lambda x: {
-            "local": "本地免费填表（零 Token，推荐）",
-            "gemini": "Gemini 视频浅捞（需 VPN）",
-        }[x],
-        horizontal=True,
-        help="本地模式不填 J/K 列。Gemini 模式识别：HookVO=前三秒台词，Text Hook=前三秒画面字幕。",
-    )
-    if analyze_mode == "local":
-        st.caption("本地模式不填 J/K 列与个人见解；Gemini 模式仅精准识别 J/K 列。")
-    if analyze_mode == "gemini":
-        _active_model = resolve_gemini_model()
-        st.caption(
-            f"当前 Gemini 模型：`{_active_model}` · {get_gemini_model_label(_active_model)} · "
-            f"仅分析前 {GEMINI_HOOK_CLIP_SECONDS}s：HookVO=台词，Text Hook=画面字幕 · 个人见解列留空"
-        )
-
-    analyze_button = st.button(
-        "🆓 开始本地免费填表" if analyze_mode == "local" else "🤖 开始 Gemini 浅捞",
-        type="primary",
-        use_container_width=True,
-    )
-
-    if analyze_button:
-        clear_export_bundle()
-        video_sources = []
-        temp_paths = []
-        try:
-            video_sources, temp_paths = collect_video_sources(
-                use_server_videos=use_server_videos,
-                batch=batch,
-                uploaded_files=uploaded_files,
-            )
-        except ValueError as e:
-            st.error(str(e))
-            st.stop()
-
-        label_kw = analyze_keyword.strip() or "manual-upload"
-        label_country = analyze_country
-        results = []
-
-        try:
-            if analyze_mode == "local":
-                progress = LocalAnalyzeProgress(len(video_sources))
-                progress.set_step(0, f"共 {len(video_sources)} 个视频")
-                progress.update(0.08, "已接收视频", "即将本地分析（零 Token）")
-
-                def _local_status(msg: str, detail: str = ""):
-                    idx_match = re.search(r"\[(\d+)/(\d+)\]", msg)
-                    idx = int(idx_match.group(1)) if idx_match else 1
-                    if "规则" in msg:
-                        progress.set_step(2)
-                        sub = 0.7
+            try:
+                def _fetch_progress(ratio: float, step: str, detail: str = ""):
+                    if ratio < 0.35:
+                        progress.set_step(0, detail or step)
+                    elif ratio < 0.85:
+                        progress.set_step(1, detail or step)
                     else:
-                        progress.set_step(1)
-                        sub = 0.35
-                    progress.update(progress.video_ratio(idx, sub), msg, detail)
+                        progress.set_step(2, detail or step)
+                    progress.update(ratio, step, detail)
 
-                results = build_local_analysis_results(
-                    video_sources,
-                    product_category=label_kw,
-                    on_status=_local_status,
+                downloaded_ads, kw_stats = collect_validated_top_videos(
+                    apify_token,
+                    search_keyword.strip(),
+                    country,
+                    top_n=TOP_N,
+                    gemini_api_key=effective_gemini_key,
+                    gemini_proxy=effective_gemini_proxy,
+                    gemini_model=resolve_gemini_model(gemini_model),
+                    on_progress=_fetch_progress,
                 )
-                results = finalize_shallow_results(
-                    results,
-                    expected_count=len(video_sources),
+
+                progress.complete_step(0)
+                progress.complete_step(1)
+
+                if not downloaded_ads:
+                    st.warning(f"⚠️ 未能凑满 {TOP_N} 条符合要求的视频。")
+                    with st.expander("查看筛选详情", expanded=True):
+                        st.markdown(_format_fetch_failure_diagnosis(kw_stats))
+                    st.info(
+                        "常见原因：① 独立视频候选不足（Apify 返回的多条广告可能共用同一视频）；"
+                        "② 视频均超过 60 秒；③ 视频下载失败；④ Gemini 不可用（现已自动降级为信任 Meta 搜索）。"
+                        "建议换更热门关键词，或在 Meta Ad Library 网页确认有足够独立视频。"
+                    )
+                    st.stop()
+
+                if len(downloaded_ads) < TOP_N:
+                    extra = ""
+                    if kw_stats.get("fallback_filled"):
+                        extra = f" · 信任Meta补齐 {kw_stats.get('fallback_count', 0)} 条"
+                    st.warning(
+                        f"⚠️ 仅找到 {len(downloaded_ads)}/{TOP_N} 条视频（"
+                        f"独立候选 {kw_stats.get('unique_video_candidates', '?')} · "
+                        f"超时长 {kw_stats.get('duration_filtered', 0)} · "
+                        f"Gemini不相关 {kw_stats.get('relevance_rejected', 0)}{extra}）"
+                    )
+                elif kw_stats.get("fallback_count"):
+                    st.info(
+                        f"ℹ️ 其中 {kw_stats.get('fallback_count')} 条由 Meta 关键词搜索信任模式补齐"
+                        "（Gemini 未通过的视频已跳过二次内容验证）。"
+                    )
+
+                progress.update(
+                    0.88,
+                    "筛选完成",
+                    f"独立视频候选 {kw_stats.get('unique_video_candidates', 0)} · "
+                    f"已验证 {kw_stats.get('candidates_tried', 0)} · "
+                    f"最终 {len(downloaded_ads)} 条",
                 )
+
+                progress.complete_step(2)
                 progress.set_step(3)
-                progress.update(0.92, "打包浅捞结果...")
-            else:
-                gemini_api_key = gemini_api_key.strip() or _secret("gemini", "api_key")
-                if not gemini_api_key:
-                    st.error("请先在侧边栏 Gemini 区域填写 API Key。")
-                    st.stop()
-
-                effective_gemini_proxy = (
-                    gemini_proxy.strip()
-                    or st.session_state.get(GEMINI_PROXY_SESSION_KEY, "")
-                    or _auto_proxy
-                )
-                configure_gemini_client(
-                    gemini_api_key,
-                    effective_gemini_proxy,
-                    model=resolve_gemini_model(),
+                progress.update(0.9, "打包视频压缩包...")
+                zip_bytes, zip_name = build_videos_only_zip(
+                    downloaded_ads, search_keyword.strip(), country
                 )
 
-                ok, conn_err = check_gemini_connectivity(effective_gemini_proxy)
-                if not ok:
-                    st.error(f"❌ 无法连接 Gemini API：{conn_err}")
-                    st.info("可改用「本地免费填表」模式（零 Token，无需 VPN）。")
-                    st.stop()
+                st.session_state["fetched_batch"] = {
+                    "keyword": search_keyword.strip(),
+                    "country": country,
+                    "ads": downloaded_ads,
+                }
+                progress.finish()
 
-                progress = AnalyzeProgress(len(video_sources))
-                progress.set_step(0, f"共 {len(video_sources)} 个视频待浅捞")
-                progress.update(0.05, "已接收视频", "即将上传至 Gemini")
+                video_source_payload = [
+                    {
+                        "index": ad["index"],
+                        "local_path": ad["local_path"],
+                        "brand_name": ad.get("brand_name", ""),
+                        "start_date": ad.get("start_date", ""),
+                        "video_url": ad.get("video_url", ""),
+                        "raw": ad.get("raw") or {},
+                        "source_name": os.path.basename(ad["local_path"]) if ad.get("local_path") else "",
+                        "download_error": ad.get("download_error"),
+                    }
+                    for ad in downloaded_ads
+                ]
+                meta_results = build_local_analysis_results(
+                    video_source_payload,
+                    product_category=search_keyword.strip(),
+                )
+                meta_results = finalize_shallow_results(
+                    meta_results,
+                    expected_count=len(downloaded_ads),
+                )
+                full_zip_bytes, full_zip_name = build_export_zip(
+                    meta_results, search_keyword.strip(), country
+                )
+                save_export_bundle(
+                    meta_results,
+                    full_zip_bytes,
+                    full_zip_name,
+                    search_keyword.strip(),
+                    country,
+                )
 
-                gemini_quota_exhausted = False
-                for idx, src in enumerate(video_sources, start=1):
-                    if gemini_quota_exhausted:
-                        progress.set_step(2)
-                        progress.update(
-                            progress.video_ratio(idx, 0.7),
-                            f"[{idx}/{len(video_sources)}] 额度已用尽，本地免费填表",
-                            src.get("brand_name") or "",
-                        )
-                        results.append(
-                            build_local_shallow_result_entry(
-                                src,
-                                product_category=label_kw,
-                                error=f"⚠️ {_gemini_quota_short_note()}",
-                            )
-                        )
-                        continue
+                st.success(f"✅ 已下载 {len(downloaded_ads)} 条视频。")
+                st.download_button(
+                    "📥 下载完整包（浅捞表格 + 视频）",
+                    data=full_zip_bytes,
+                    file_name=full_zip_name,
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="fetch_full_zip",
+                )
+                st.download_button(
+                    "📥 仅下载视频包（mp4 + 元数据.json）",
+                    data=zip_bytes,
+                    file_name=zip_name,
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="fetch_videos_only_zip",
+                )
+                st.caption(
+                    "已用本地 ffmpeg + 规则推断填表（零 Token）。"
+                    "Hook/场景等为算法推测，可在 Excel 中微调。"
+                )
 
-                    progress.set_step(1)
-                    progress.update(progress.video_ratio(idx, 0.1), f"[{idx}/{len(video_sources)}] 准备 Gemini 分析")
+                st.subheader("已下载视频预览")
+                for ad in downloaded_ads:
+                    st.markdown(f"**#{ad['index']} {ad['brand_name']}** · 开始投放：{ad['start_date']}")
+                    if ad["local_path"] and os.path.exists(ad["local_path"]):
+                        st.video(ad["local_path"])
+                    st.caption(ad["video_url"])
 
-                    def _gemini_status(msg: str, detail: str = "", _idx=idx):
-                        sub = 0.35
-                        if "压缩" in msg:
-                            sub = 0.12
-                        elif "上传" in msg:
-                            sub = 0.2
-                        elif "转码" in msg or "处理" in msg or "等待" in msg:
-                            sub = 0.55
-                        elif "生成" in msg:
-                            sub = 0.88
+            except Exception as e:
+                if _is_apify_auth_error(e):
+                    st.error("❌ Apify Token 无效或已过期，无法抓取广告库。")
+                    with st.expander("如何配置 Apify Token", expanded=True):
+                        st.markdown(_apify_auth_help_markdown())
+                else:
+                    st.error(f"❌ 抓取失败：{e}")
+                    with st.expander("错误详情"):
+                        st.code(traceback.format_exc())
+
+        elif st.session_state.get("fetched_batch"):
+            batch = st.session_state["fetched_batch"]
+            st.info(
+                f"当前会话已有下载批次：关键词「{batch.get('keyword')}」· "
+                f"{len(batch.get('ads', []))} 条视频。可在步骤②上传或直接使用。"
+            )
+            for ad in batch.get("ads", []):
+                st.markdown(f"**#{ad['index']} {ad.get('brand_name', '')}**")
+                if ad.get("local_path") and os.path.exists(ad["local_path"]):
+                    st.video(ad["local_path"])
+
+        fetch_bundle = get_export_bundle()
+        if fetch_bundle and fetch_bundle.get("zip_bytes"):
+            st.markdown("---")
+            render_export_download_section(
+                fetch_bundle.get("results") or [],
+                fetch_bundle.get("zip_bytes") or b"",
+                fetch_bundle.get("zip_filename") or "export.zip",
+                fetch_bundle.get("keyword") or "",
+                fetch_bundle.get("country") or "ALL",
+                default_recipients=default_recipients,
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+                smtp_user=smtp_user,
+                smtp_password=smtp_password,
+                smtp_from_name=smtp_from_name,
+                key_prefix="fetch",
+            )
+    with tab_analyze:
+        st.markdown(
+            "将步骤①下载的视频（或任意 mp4）生成浅捞表格。"
+            " **默认「本地免费填表」：零 Token，不上传视频。**"
+        )
+
+        batch = st.session_state.get("fetched_batch")
+        use_server_videos = False
+        if batch and batch.get("ads"):
+            use_server_videos = st.checkbox(
+                "直接使用步骤①已下载的视频（跳过上传）",
+                value=True,
+                help="若你已在步骤①下载，可勾选此项免去重新上传。",
+            )
+
+        uploaded_files = None
+        if not use_server_videos:
+            uploaded_files = st.file_uploader(
+                "上传视频文件（mp4，最多 3 个，按顺序对应视频编号 1~3）",
+                type=["mp4"],
+                accept_multiple_files=True,
+            )
+            if uploaded_files and len(uploaded_files) > TOP_N:
+                st.warning(f"最多处理 {TOP_N} 个视频，将只取前 {TOP_N} 个。")
+                uploaded_files = uploaded_files[:TOP_N]
+
+        analyze_keyword = st.text_input(
+            "批次标签 / 搜索关键词（用于打包文件名 & 商品类目）",
+            value=(batch or {}).get("keyword", ""),
+            placeholder="可与步骤①一致，或自行填写",
+            key="analyze_keyword",
+        )
+        _country_options = ["ALL", "US", "GB", "CA", "AU", "DE", "FR", "JP", "SG"]
+        _default_country = (batch or {}).get("country", "ALL")
+        analyze_country = st.selectbox(
+            "地区标签",
+            options=_country_options,
+            index=_country_options.index(_default_country) if _default_country in _country_options else 0,
+            key="analyze_country",
+        )
+
+        analyze_mode = st.radio(
+            "分析方式",
+            options=["local", "gemini"],
+            index=0,
+            format_func=lambda x: {
+                "local": "本地免费填表（零 Token，推荐）",
+                "gemini": "Gemini 视频浅捞（需 VPN）",
+            }[x],
+            horizontal=True,
+            help="本地模式不填 J/K 列。Gemini 模式识别：HookVO=前三秒台词，Text Hook=前三秒画面字幕。",
+        )
+        if analyze_mode == "local":
+            st.caption("本地模式不填 J/K 列与个人见解；Gemini 模式仅精准识别 J/K 列。")
+        if analyze_mode == "gemini":
+            _active_model = resolve_gemini_model()
+            st.caption(
+                f"当前 Gemini 模型：`{_active_model}` · {get_gemini_model_label(_active_model)} · "
+                f"仅分析前 {GEMINI_HOOK_CLIP_SECONDS}s：HookVO=台词，Text Hook=画面字幕 · 个人见解列留空"
+            )
+
+        analyze_button = st.button(
+            "🆓 开始本地免费填表" if analyze_mode == "local" else "🤖 开始 Gemini 浅捞",
+            type="primary",
+            use_container_width=True,
+        )
+
+        if analyze_button:
+            clear_export_bundle()
+            video_sources = []
+            temp_paths = []
+            try:
+                video_sources, temp_paths = collect_video_sources(
+                    use_server_videos=use_server_videos,
+                    batch=batch,
+                    uploaded_files=uploaded_files,
+                )
+            except ValueError as e:
+                st.error(str(e))
+                st.stop()
+
+            label_kw = analyze_keyword.strip() or "manual-upload"
+            label_country = analyze_country
+            results = []
+
+            try:
+                if analyze_mode == "local":
+                    progress = LocalAnalyzeProgress(len(video_sources))
+                    progress.set_step(0, f"共 {len(video_sources)} 个视频")
+                    progress.update(0.08, "已接收视频", "即将本地分析（零 Token）")
+
+                    def _local_status(msg: str, detail: str = ""):
+                        idx_match = re.search(r"\[(\d+)/(\d+)\]", msg)
+                        idx = int(idx_match.group(1)) if idx_match else 1
+                        if "规则" in msg:
                             progress.set_step(2)
-                        progress.update(
-                            progress.video_ratio(_idx, sub),
-                            f"[{_idx}/{len(video_sources)}] {msg}",
-                            detail,
-                        )
+                            sub = 0.7
+                        else:
+                            progress.set_step(1)
+                            sub = 0.35
+                        progress.update(progress.video_ratio(idx, sub), msg, detail)
 
-                    try:
-                        hook_fields = extract_video_hooks_with_gemini(
-                            src["local_path"],
-                            video_index=src["index"],
-                            video_url=src["video_url"],
-                            raw_item=src.get("raw"),
-                            on_status=_gemini_status,
-                        )
-                        results.append(
-                            {
-                                "index": src["index"],
-                                "brand_name": src.get("brand_name"),
-                                "start_date": src.get("start_date"),
-                                "video_url": src["video_url"],
-                                "local_path": src["local_path"],
-                                "raw": src.get("raw") or {},
-                                "product_category": label_kw,
-                                "hook_fields": hook_fields,
-                                "raw_report": json.dumps(hook_fields, ensure_ascii=False),
-                                "report": None,
-                                "error": None,
-                            }
-                        )
-                    except Exception as e:
-                        if _is_gemini_quota_error(e):
-                            gemini_quota_exhausted = True
-                            st.warning(_gemini_quota_hint(e))
+                    results = build_local_analysis_results(
+                        video_sources,
+                        product_category=label_kw,
+                        on_status=_local_status,
+                    )
+                    results = finalize_shallow_results(
+                        results,
+                        expected_count=len(video_sources),
+                    )
+                    progress.set_step(3)
+                    progress.update(0.92, "打包浅捞结果...")
+                else:
+                    gemini_api_key = gemini_api_key.strip() or _secret("gemini", "api_key")
+                    if not gemini_api_key:
+                        st.error("请先在侧边栏 Gemini 区域填写 API Key。")
+                        st.stop()
+
+                    effective_gemini_proxy = (
+                        gemini_proxy.strip()
+                        or st.session_state.get(GEMINI_PROXY_SESSION_KEY, "")
+                        or _auto_proxy
+                    )
+                    configure_gemini_client(
+                        gemini_api_key,
+                        effective_gemini_proxy,
+                        model=resolve_gemini_model(),
+                    )
+
+                    ok, conn_err = check_gemini_connectivity(effective_gemini_proxy)
+                    if not ok:
+                        st.error(f"❌ 无法连接 Gemini API：{conn_err}")
+                        st.info("可改用「本地免费填表」模式（零 Token，无需 VPN）。")
+                        st.stop()
+
+                    progress = AnalyzeProgress(len(video_sources))
+                    progress.set_step(0, f"共 {len(video_sources)} 个视频待浅捞")
+                    progress.update(0.05, "已接收视频", "即将上传至 Gemini")
+
+                    gemini_quota_exhausted = False
+                    for idx, src in enumerate(video_sources, start=1):
+                        if gemini_quota_exhausted:
+                            progress.set_step(2)
+                            progress.update(
+                                progress.video_ratio(idx, 0.7),
+                                f"[{idx}/{len(video_sources)}] 额度已用尽，本地免费填表",
+                                src.get("brand_name") or "",
+                            )
                             results.append(
                                 build_local_shallow_result_entry(
                                     src,
@@ -4352,7 +4659,36 @@ with tab_analyze:
                                     error=f"⚠️ {_gemini_quota_short_note()}",
                                 )
                             )
-                        else:
+                            continue
+
+                        progress.set_step(1)
+                        progress.update(progress.video_ratio(idx, 0.1), f"[{idx}/{len(video_sources)}] 准备 Gemini 分析")
+
+                        def _gemini_status(msg: str, detail: str = "", _idx=idx):
+                            sub = 0.35
+                            if "压缩" in msg:
+                                sub = 0.12
+                            elif "上传" in msg:
+                                sub = 0.2
+                            elif "转码" in msg or "处理" in msg or "等待" in msg:
+                                sub = 0.55
+                            elif "生成" in msg:
+                                sub = 0.88
+                                progress.set_step(2)
+                            progress.update(
+                                progress.video_ratio(_idx, sub),
+                                f"[{_idx}/{len(video_sources)}] {msg}",
+                                detail,
+                            )
+
+                        try:
+                            hook_fields = extract_video_hooks_with_gemini(
+                                src["local_path"],
+                                video_index=src["index"],
+                                video_url=src["video_url"],
+                                raw_item=src.get("raw"),
+                                on_status=_gemini_status,
+                            )
                             results.append(
                                 {
                                     "index": src["index"],
@@ -4362,46 +4698,78 @@ with tab_analyze:
                                     "local_path": src["local_path"],
                                     "raw": src.get("raw") or {},
                                     "product_category": label_kw,
+                                    "hook_fields": hook_fields,
+                                    "raw_report": json.dumps(hook_fields, ensure_ascii=False),
                                     "report": None,
-                                    "error": _gemini_error_hint(e),
+                                    "error": None,
                                 }
                             )
+                        except Exception as e:
+                            if _is_gemini_quota_error(e):
+                                gemini_quota_exhausted = True
+                                st.warning(_gemini_quota_hint(e))
+                                results.append(
+                                    build_local_shallow_result_entry(
+                                        src,
+                                        product_category=label_kw,
+                                        error=f"⚠️ {_gemini_quota_short_note()}",
+                                    )
+                                )
+                            else:
+                                results.append(
+                                    {
+                                        "index": src["index"],
+                                        "brand_name": src.get("brand_name"),
+                                        "start_date": src.get("start_date"),
+                                        "video_url": src["video_url"],
+                                        "local_path": src["local_path"],
+                                        "raw": src.get("raw") or {},
+                                        "product_category": label_kw,
+                                        "report": None,
+                                        "error": _gemini_error_hint(e),
+                                    }
+                                )
 
-                progress.set_step(3)
-                progress.update(0.92, "打包浅捞结果...")
+                    progress.set_step(3)
+                    progress.update(0.92, "打包浅捞结果...")
 
-            results = finalize_shallow_results(
-                results,
-                expected_count=len(video_sources),
+                results = finalize_shallow_results(
+                    results,
+                    expected_count=len(video_sources),
+                )
+                zip_bytes, zip_filename = build_export_zip(results, label_kw, label_country)
+                save_export_bundle(results, zip_bytes, zip_filename, label_kw, label_country)
+                progress.finish()
+
+            except Exception as e:
+                st.error(f"❌ 浅捞过程出错：{e}")
+                st.code(traceback.format_exc())
+            finally:
+                for path in temp_paths:
+                    try:
+                        if path and os.path.exists(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
+
+        export_bundle = get_export_bundle()
+        if export_bundle and export_bundle.get("zip_bytes"):
+            render_export_download_section(
+                export_bundle.get("results") or [],
+                export_bundle.get("zip_bytes") or b"",
+                export_bundle.get("zip_filename") or "export.zip",
+                export_bundle.get("keyword") or "",
+                export_bundle.get("country") or "ALL",
+                default_recipients=default_recipients,
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+                smtp_user=smtp_user,
+                smtp_password=smtp_password,
+                smtp_from_name=smtp_from_name,
+                key_prefix="analyze",
             )
-            zip_bytes, zip_filename = build_export_zip(results, label_kw, label_country)
-            save_export_bundle(results, zip_bytes, zip_filename, label_kw, label_country)
-            progress.finish()
 
-        except Exception as e:
-            st.error(f"❌ 浅捞过程出错：{e}")
-            st.code(traceback.format_exc())
-        finally:
-            for path in temp_paths:
-                try:
-                    if path and os.path.exists(path):
-                        os.remove(path)
-                except Exception:
-                    pass
 
-    export_bundle = get_export_bundle()
-    if export_bundle and export_bundle.get("zip_bytes"):
-        render_export_download_section(
-            export_bundle.get("results") or [],
-            export_bundle.get("zip_bytes") or b"",
-            export_bundle.get("zip_filename") or "export.zip",
-            export_bundle.get("keyword") or "",
-            export_bundle.get("country") or "ALL",
-            default_recipients=default_recipients,
-            smtp_host=smtp_host,
-            smtp_port=smtp_port,
-            smtp_user=smtp_user,
-            smtp_password=smtp_password,
-            smtp_from_name=smtp_from_name,
-            key_prefix="analyze",
-        )
+if __name__ == "__main__":
+    _configure_page_standalone()
+    render_fb_competitor_tool(embedded=False)
