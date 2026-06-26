@@ -946,21 +946,17 @@ def build_system_prompt(report_type: str, date_mode: str) -> str:
 # 输出结构要求（必须严格按以下 Markdown 结构输出，使用简体中文）
 
 ## 一、大盘纵览（Executive Summary）
-- 结合 Shopify 的销售额（大盘数据）与各广告渠道的总消耗（前端总消耗），评估整体投入产出比（可估算"大盘 ROAS ≈ 总销售额 / 总广告消耗"）与业务体量。
-- 若是周报/月报或日期范围/周末汇总，必须明确指出整体趋势方向（增长/下降/波动），并点出关键时间节点或异常日期。
+- 结合 Shopify 的销售额（大盘数据）与各广告渠道的总消耗，评估整体投入产出比与业务体量。
 
-## 二、渠道表现拆解
+## 二、环比对比（Period-over-Period）
+- 与**上一周期**（日报=上一日，周报=上一 Week/区间，周末=上一周末）对比消耗、ROAS、订单等核心指标变化。
+- 环比表格由系统自动生成；你需撰写环比洞察，引用表格中的涨跌数字。
+
+## 三、渠道表现拆解
 - 跨 Sheet 对比 Google、各个 Meta 账号、AppLovin（Axon）的消耗与 ROAS / 转化表现。
-- 建议使用表格或分点方式，清晰指出：
-  - 哪些渠道/账号是「增长引擎」（消耗增长且 ROAS 健康、转化稳健）；
-  - 哪些渠道/账号在「拖后腿」（ROAS 偏低、消耗虚高或转化下滑）。
 
-## 三、下一步行动指令（Action Items）
-- 给出具体、可执行的建议，包括：
-  - 预算调整：明确指出哪个渠道/账号 加预算多少（百分比或金额）、哪个 减预算多少；
-  - 关停/暂停建议：对明显持续亏损、无改善趋势的渠道/账号给出关停建议；
-  - 放量建议：对表现优异的渠道/账号给出加速放量的具体方式（如提升预算上限、扩量人群包等）。
-- 建议必须具体可执行，避免"持续观察"、"进一步优化"等空泛表述。
+## 四、下一步行动指令（Action Items）
+- 给出具体、可执行的预算与关停/放量建议。
 
 # 注意事项
 - 全文使用简体中文，语言专业、简洁、有决策力。
@@ -968,10 +964,10 @@ def build_system_prompt(report_type: str, date_mode: str) -> str:
 - 不要输出与上述结构无关的内容，不要重复粘贴原始数据。
 
 # 硬性要求（必须遵守，否则视为失败）
-- **必须完整输出三个章节**，不得在中途停止；第二章表格必须填写完整，不能只写表头。
+- **必须完整输出四个章节**，不得在中途停止；第三章表格由系统生成，你需补充 3.3 洞察。
 - **所有结论必须引用原始数据中的具体数字**（消耗、ROAS、ROI、销售额、订单数等），禁止空泛描述。
-- 第二章表格至少包含：Shopify 大盘、Google、Axon(AppLovin)、WearNuage、Nuage Bra 等所有有数据的渠道。
-- 第三章至少给出 **3 条以上** 具体行动建议，每条含渠道名 + 量化调整幅度。
+- 第三章表格至少包含：Shopify 大盘、Google、Axon(AppLovin)、WearNuage、Nuage Bra 等所有有数据的渠道。
+- 第四章至少给出 **3 条以上** 具体行动建议，每条含渠道名 + 量化调整幅度。
 - 报告总篇幅不少于 **800 字**。
 """
 
@@ -1113,9 +1109,9 @@ def build_channel_tables_markdown(extracted_data: dict) -> str:
     """用代码从原始数据生成完整渠道表格，不依赖 LLM。"""
     shopify_row = _get_shopify_row(extracted_data)
     lines = [
-        "## 二、渠道表现拆解",
+        "## 三、渠道表现拆解",
         "",
-        "### 2.1 渠道核心指标汇总",
+        "### 3.1 渠道核心指标汇总",
         "",
         "| 渠道/账号 | 消耗 (USD) | ROAS/ROI | 出单/订单 | 其他 |",
         "|----------|-----------|----------|----------|------|",
@@ -1145,7 +1141,7 @@ def build_channel_tables_markdown(extracted_data: dict) -> str:
             f"| {s['channel']} | {spend_s} | {roas_s} | {orders_s} | {s['extra']} |"
         )
 
-    lines.extend(["", "### 2.2 各渠道完整指标明细", ""])
+    lines.extend(["", "### 3.2 各渠道完整指标明细", ""])
     for sheet_name, data in extracted_data.items():
         if not isinstance(data, list) or not data:
             lines.append(f"**{sheet_name}**：{data}")
@@ -1173,6 +1169,183 @@ def build_channel_tables_markdown(extracted_data: dict) -> str:
                 display_val = "无数据" if val == "/" else val
                 lines.append(f"| {prefix}{key} | {display_val} |")
         lines.append("")
+
+    return "\n".join(lines)
+
+
+def resolve_previous_period(
+    date_mode: str,
+    valid_dates: list,
+    selected_date=None,
+    start_date=None,
+    end_date=None,
+    weekend_bucket=None,
+    week_bucket=None,
+    week_buckets=None,
+    weekend_buckets=None,
+) -> Optional[tuple]:
+    """
+    按当前时间维度解析「上一周期」提取参数。
+    返回 (extract_data_for_report 的 kwargs 片段, 对比周期说明文案)，无上一周期则 None。
+    """
+    week_buckets = week_buckets or []
+    weekend_buckets = weekend_buckets or []
+
+    if date_mode == "single":
+        if selected_date is None:
+            return None
+        prev_date = selected_date - timedelta(days=1)
+        if valid_dates and prev_date not in valid_dates:
+            earlier = [d for d in valid_dates if d < selected_date]
+            if not earlier:
+                return None
+            prev_date = max(earlier)
+        label = f"{prev_date.strftime('%Y-%m-%d')}（上一日）"
+        return ({"selected_date": prev_date}, label)
+
+    if date_mode == "week":
+        if not week_bucket or not week_buckets:
+            return None
+        idx = week_bucket.get("bucket_index", 0)
+        if idx <= 0:
+            return None
+        prev_bucket = week_buckets[idx - 1]
+        wn = prev_bucket.get("week_number")
+        label = (
+            f"Week {wn}（上一周）"
+            if wn is not None
+            else f"{prev_bucket.get('raw_label', '上一周')}（上一周）"
+        )
+        return ({"week_bucket": prev_bucket}, label)
+
+    if date_mode == "weekend":
+        if not weekend_bucket or not weekend_buckets:
+            return None
+        idx = weekend_bucket.get("bucket_index", 0)
+        if idx <= 0:
+            return None
+        prev_bucket = weekend_buckets[idx - 1]
+        label = (
+            f"{prev_bucket['start'].strftime('%Y-%m-%d')} ~ "
+            f"{prev_bucket['end'].strftime('%Y-%m-%d')}（上一周末）"
+        )
+        return ({"week_bucket": prev_bucket}, label)
+
+    if start_date is None or end_date is None:
+        return None
+    period_days = (end_date - start_date).days + 1
+    prev_end = start_date - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=period_days - 1)
+    if period_days == 1:
+        label = f"{prev_start.strftime('%Y-%m-%d')}（上一日）"
+    elif period_days == 7:
+        label = f"{prev_start.strftime('%Y-%m-%d')} 至 {prev_end.strftime('%Y-%m-%d')}（上一周）"
+    else:
+        label = f"{prev_start.strftime('%Y-%m-%d')} 至 {prev_end.strftime('%Y-%m-%d')}（上一区间）"
+    return ({"start_date": prev_start, "end_date": prev_end}, label)
+
+
+def _summarize_channels_for_comparison(extracted_data: dict) -> dict:
+    shopify_row = _get_shopify_row(extracted_data)
+    summaries = {}
+    for sheet_name, data in extracted_data.items():
+        if not isinstance(data, list) or not data:
+            continue
+        row = _pick_summary_row(data)
+        summary = _extract_channel_summary(sheet_name, row, shopify_row)
+        if "shopify" in str(sheet_name).lower():
+            summary["spend"] = _find_first_numeric(row, ["Ad Spent_Total"])
+            summary["roas"] = _find_first_numeric(row, ["MER", "ROI", "ROAS"])
+            summary["orders"] = _find_first_numeric(row, ["订单", "Oders", "Orders"])
+            summary["sales"] = _find_first_numeric(row, ["Total Sales", "销售额"])
+        summaries[sheet_name] = summary
+    return summaries
+
+
+def _format_metric_delta(current, previous) -> str:
+    if current is None or previous is None:
+        return "-"
+    delta = float(current) - float(previous)
+    if previous == 0:
+        pct_text = "N/A"
+    else:
+        pct = delta / abs(float(previous)) * 100
+        pct_text = f"{pct:+.1f}%"
+    sign = "+" if delta >= 0 else ""
+    if delta == int(delta):
+        return f"{sign}{int(delta):,} ({pct_text})"
+    return f"{sign}{delta:,.2f} ({pct_text})"
+
+
+def build_period_comparison_markdown(
+    current_data: dict,
+    previous_data: Optional[dict],
+    current_label: str,
+    previous_label: str,
+) -> str:
+    """生成环比对比表格（本周期 vs 上一周期）。"""
+    lines = [
+        "## 二、环比对比（Period-over-Period）",
+        "",
+        f"**本周期**：{current_label}  ·  **对比周期**：{previous_label or '—'}",
+        "",
+    ]
+    if not previous_data:
+        lines.append("⚠️ 未找到上一周期数据，本次跳过环比分析。")
+        return "\n".join(lines)
+
+    current_summaries = _summarize_channels_for_comparison(current_data)
+    previous_summaries = _summarize_channels_for_comparison(previous_data)
+    if not current_summaries:
+        lines.append("⚠️ 本周期无有效渠道数据，无法生成环比表。")
+        return "\n".join(lines)
+
+    lines.extend([
+        "### 2.1 核心指标环比",
+        "",
+        "| 渠道/账号 | 本周期消耗 | 上周期消耗 | 消耗变化 | 本周期 ROAS | 上周期 ROAS | ROAS 变化 | 订单变化 |",
+        "|----------|-----------|-----------|---------|------------|------------|----------|---------|",
+    ])
+
+    for channel, cur in current_summaries.items():
+        prev = previous_summaries.get(channel, {})
+        lines.append(
+            "| {channel} | {c_spend} | {p_spend} | {d_spend} | {c_roas} | {p_roas} | {d_roas} | {d_orders} |".format(
+                channel=channel,
+                c_spend=_fmt_metric(cur["spend"]) if cur.get("spend") is not None else "-",
+                p_spend=_fmt_metric(prev.get("spend")) if prev.get("spend") is not None else "-",
+                d_spend=_format_metric_delta(cur.get("spend"), prev.get("spend")),
+                c_roas=_fmt_metric(cur["roas"]) if cur.get("roas") is not None else "-",
+                p_roas=_fmt_metric(prev.get("roas")) if prev.get("roas") is not None else "-",
+                d_roas=_format_metric_delta(cur.get("roas"), prev.get("roas")),
+                d_orders=_format_metric_delta(cur.get("orders"), prev.get("orders")),
+            )
+        )
+
+    shopify_key = next((k for k in current_summaries if "shopify" in k.lower()), None)
+    if shopify_key and shopify_key in previous_summaries:
+        shopify_cur = current_summaries[shopify_key]
+        shopify_prev = previous_summaries[shopify_key]
+        lines.extend([
+            "",
+            "### 2.1.1 Shopify 大盘环比",
+            "",
+            f"- 销售额：{_fmt_metric(shopify_cur.get('sales')) if shopify_cur.get('sales') is not None else '-'} "
+            f"→ 上周期 {_fmt_metric(shopify_prev.get('sales')) if shopify_prev.get('sales') is not None else '-'} "
+            f"（{_format_metric_delta(shopify_cur.get('sales'), shopify_prev.get('sales'))}）",
+            f"- 总广告消耗：{_format_metric_delta(shopify_cur.get('spend'), shopify_prev.get('spend'))}",
+            f"- MER/ROAS：{_format_metric_delta(shopify_cur.get('roas'), shopify_prev.get('roas'))}",
+        ])
+
+    missing_prev = [
+        ch for ch in current_summaries
+        if ch not in previous_summaries or not previous_summaries.get(ch)
+    ]
+    if missing_prev:
+        lines.extend([
+            "",
+            f"*注：以下渠道上周期无对应数据：{', '.join(missing_prev)}*",
+        ])
 
     return "\n".join(lines)
 
@@ -1619,32 +1792,46 @@ REPORT_SECTIONS = [
             "- 引用 Shopify 总销售额、总广告消耗、订单数、MER/ROI 等**具体数字**\n"
             "- 计算并写出大盘 ROAS（销售额÷广告消耗）\n"
             "- 3~5 条要点，评估本周期整体盈亏与体量\n"
-            "**禁止**写第二、三章。"
+            "**禁止**写第二、三、四章。"
         ),
         "min_chars": 180,
     },
     {
+        "id": "comparison",
+        "title": "## 二、环比对比（Period-over-Period）",
+        "instruction": (
+            "环比表格已由系统自动生成（见下方）。请**只写**「### 2.2 环比洞察与诊断」小节：\n"
+            "- 指出消耗/ROAS/订单变化最大的 3 个渠道，必须引用表格中的**具体数字与涨跌幅度**\n"
+            "- 判断整体环比变好、变差或结构性分化\n"
+            "- 2~3 条可能原因假设（基于数据，勿编造）\n"
+            "**禁止**重复输出表格；**禁止**写其他章节。"
+        ),
+        "min_chars": 160,
+        "skip_title": True,
+    },
+    {
         "id": "channel",
-        "title": "## 二、渠道表现拆解",
+        "title": "## 三、渠道表现拆解",
         "instruction": (
             "渠道数据表格已由系统自动生成（见下方），你**不要重复输出表格**。\n"
-            "请**只写**「### 2.3 渠道洞察与诊断」小节，包含：\n"
+            "请**只写**「### 3.3 渠道洞察与诊断」小节，包含：\n"
             "- 3~5 条 bullet：**增长引擎**（渠道名 + 具体 ROAS/消耗数字 + 原因）\n"
             "- 3~5 条 bullet：**拖后腿渠道**（渠道名 + 具体问题数字 + 风险）\n"
             "- 2~3 条 cross-channel 对比结论（如 Meta vs Google vs AppLovin）\n"
-            "**禁止**写第一、三章；**禁止**重新输出 Markdown 表格。"
+            "**禁止**写第一、二、四章；**禁止**重新输出 Markdown 表格。"
         ),
         "min_chars": 200,
         "skip_title": True,
     },
     {
-        "title": "## 三、下一步行动指令（Action Items）",
+        "title": "## 四、下一步行动指令（Action Items）",
         "instruction": (
-            "请**只写第三章**「下一步行动指令（Action Items）」。\n"
+            "请**只写第四章**「下一步行动指令（Action Items）」。\n"
             "- 至少 **5 条** numbered list，每条格式：\n"
             "  **【渠道/账号】** 动作描述（含量化幅度，如 +20% / -500 USD / 暂停 XX 广告组）\n"
             "- 覆盖：加预算、减预算、暂停、放量 等类型\n"
-            "**禁止**写第一、二章。"
+            "- 可结合第二章环比结论给出针对性动作\n"
+            "**禁止**写第一、二、三章。"
         ),
         "min_chars": 280,
     },
@@ -1670,9 +1857,12 @@ def generate_report(
     user_content: str,
     temperature: float = 0.5,
     extracted_data: dict = None,
+    previous_extracted_data: dict = None,
+    current_period_label: str = "",
+    previous_period_label: str = "",
 ) -> str:
     """
-    分三节依次调用大模型，再合并为完整报告，避免单次输出被截断。
+    分四节依次调用大模型，再合并为完整报告，避免单次输出被截断。
     """
     read_timeout = 300.0
     connect_timeout = 60.0
@@ -1696,10 +1886,24 @@ def generate_report(
     report_temperature = min(temperature, 0.4)
 
     sections_out = []
+    comparison_tables = build_period_comparison_markdown(
+        extracted_data or {},
+        previous_extracted_data,
+        current_period_label,
+        previous_period_label,
+    )
     try:
         with httpx.Client(timeout=timeout) as client:
             for section in REPORT_SECTIONS:
-                if section.get("id") == "channel" and extracted_data:
+                if section.get("id") == "comparison":
+                    if "跳过环比" in comparison_tables or "未找到上一周期" in comparison_tables:
+                        sections_out.append(comparison_tables)
+                        continue
+                    section_user = (
+                        f"{user_content}\n\n---\n已生成的环比表格：\n{comparison_tables}\n\n"
+                        f"{section['instruction']}"
+                    )
+                elif section.get("id") == "channel" and extracted_data:
                     channel_tables = build_channel_tables_markdown(extracted_data)
                     section_user = (
                         f"{user_content}\n\n---\n已生成的渠道表格：\n{channel_tables}\n\n"
@@ -1748,14 +1952,24 @@ def generate_report(
                             ),
                         })
 
-                if section.get("id") == "channel" and extracted_data:
+                if section.get("id") == "comparison" and previous_extracted_data:
+                    analysis = content.strip()
+                    if analysis.startswith("##"):
+                        analysis = analysis.split("\n", 1)[-1].strip()
+                    sections_out.append(
+                        comparison_tables + "\n\n" + (
+                            analysis if analysis.startswith("###")
+                            else "### 2.2 环比洞察与诊断\n\n" + analysis
+                        )
+                    )
+                elif section.get("id") == "channel" and extracted_data:
                     analysis = content.strip()
                     if analysis.startswith("##"):
                         analysis = analysis.split("\n", 1)[-1].strip()
                     sections_out.append(
                         channel_tables + "\n\n" + (
                             analysis if analysis.startswith("###")
-                            else "### 2.3 渠道洞察与诊断\n\n" + analysis
+                            else "### 3.3 渠道洞察与诊断\n\n" + analysis
                         )
                     )
                 else:
@@ -2517,6 +2731,27 @@ def main(*, embedded: bool = False) -> None:
                         week_bucket=week_bucket,
                     )
 
+                    previous_extracted_data = None
+                    previous_period_label = ""
+                    prev_resolved = resolve_previous_period(
+                        date_mode=date_mode,
+                        valid_dates=valid_dates,
+                        selected_date=selected_date,
+                        start_date=start_date,
+                        end_date=end_date,
+                        weekend_bucket=weekend_bucket,
+                        week_bucket=week_bucket,
+                        week_buckets=week_buckets,
+                        weekend_buckets=weekend_buckets,
+                    )
+                    if prev_resolved:
+                        prev_kwargs, previous_period_label = prev_resolved
+                        previous_extracted_data = extract_data_for_report(
+                            sheets_dict=sheets,
+                            date_mode=date_mode,
+                            **prev_kwargs,
+                        )
+
                 with st.expander("🧾 查看提交给 AI 的原始数据（调试用）"):
                     for sheet_name, data in extracted_data.items():
                         st.markdown(f"**{sheet_name}**")
@@ -2531,7 +2766,7 @@ def main(*, embedded: bool = False) -> None:
                             except Exception as e:
                                 st.text(f"（展示失败：{e}）")
 
-                with st.spinner("AI 正在分三节生成完整报告（约 2~5 分钟）..."):
+                with st.spinner("AI 正在分四节生成完整报告（约 3~6 分钟）..."):
                     system_prompt = build_system_prompt(report_type, date_mode)
                     user_content = build_user_content(extracted_data, date_info, date_mode)
                     report = generate_report(
@@ -2542,6 +2777,9 @@ def main(*, embedded: bool = False) -> None:
                         user_content=user_content,
                         temperature=temperature,
                         extracted_data=extracted_data,
+                        previous_extracted_data=previous_extracted_data,
+                        current_period_label=date_info,
+                        previous_period_label=previous_period_label,
                     )
 
                 st.session_state["report"] = report
