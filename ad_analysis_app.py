@@ -13,6 +13,7 @@ import ssl
 import tempfile
 import time
 from datetime import datetime, date, timedelta
+from typing import Optional
 from email.header import Header
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
@@ -1784,6 +1785,120 @@ def generate_report(
         return f"❌ 调用大模型 API 时发生错误：{e}\n\n请检查 API Key、Base URL、模型名称是否正确。"
 
 
+def build_followup_system_prompt() -> str:
+    return """# 角色
+你是跨境电商 Meta / Google / AppLovin 投放数据分析助手。用户已基于同一批 Excel 数据收到一份 AI 分析报告，现在追问具体问题。
+
+# 要求
+- 必须结合提供的**数据摘要**与**已生成报告**作答，引用具体数字（消耗、ROAS、ROI、订单等）
+- 回答简洁、可执行，使用简体中文
+- 数据不足以回答时，明确说明缺少哪些字段或渠道
+- **不要**整段复述报告，不要编造未提供的数据
+- 若用户要求与报告矛盾，以原始数据为准并说明差异
+"""
+
+
+def _build_followup_context(
+    extracted_data: dict,
+    report_text: str,
+    date_info: str,
+    report_type: str,
+) -> str:
+    digest = build_data_digest(extracted_data)
+    report_excerpt = (report_text or "").strip()
+    if len(report_excerpt) > 12000:
+        report_excerpt = report_excerpt[:12000] + "\n\n…（报告后续内容已截断，必要时请用户缩小问题范围）"
+    return (
+        f"【报告类型】{report_type}\n"
+        f"【数据区间】{date_info}\n\n"
+        f"【数据摘要】\n{digest}\n\n"
+        f"【已生成的分析报告（供参考，勿整段复述）】\n{report_excerpt}"
+    )
+
+
+def answer_followup_question(
+    api_key: str,
+    base_url: str,
+    model_name: str,
+    temperature: float,
+    extracted_data: dict,
+    report_text: str,
+    date_info: str,
+    report_type: str,
+    question: str,
+    history: Optional[list] = None,
+) -> str:
+    """基于同一批数据与已生成报告，回答用户的追问（单次 API 调用）。"""
+    if not api_key:
+        return "❌ 请先在侧边栏填写 Gemini API Key。"
+    if not (question or "").strip():
+        return "❌ 请输入问题。"
+
+    api_key = _require_ascii(_sanitize_api_key(api_key), "API Key")
+    base_url = _require_ascii(base_url.rstrip("/"), "Base URL")
+    model_name = _require_ascii(model_name, "模型名称")
+    _validate_llm_credentials(api_key, base_url)
+
+    context_block = _build_followup_context(
+        extracted_data, report_text, date_info, report_type
+    )
+    messages = [{"role": "system", "content": build_followup_system_prompt()}]
+    history = history or []
+
+    if not history:
+        messages.append({
+            "role": "user",
+            "content": f"{context_block}\n\n【我的问题】\n{question.strip()}",
+        })
+    else:
+        first = True
+        for turn in history:
+            role = turn.get("role")
+            content = turn.get("content", "")
+            if role not in ("user", "assistant"):
+                continue
+            if role == "user" and first:
+                messages.append({
+                    "role": "user",
+                    "content": f"{context_block}\n\n【我的问题】\n{content}",
+                })
+                first = False
+            else:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": question.strip()})
+
+    url = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": min(temperature, 0.6),
+        "max_tokens": 2048,
+    }
+    timeout = httpx.Timeout(180.0, connect=60.0)
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            data = _request_chat_completion(
+                client, url, headers, payload, retry_delays=(5, 15)
+            )
+        content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+        return content.strip() or "（模型未返回内容，请重试。）"
+    except ValueError as e:
+        return f"❌ {e}"
+    except httpx.TimeoutException:
+        return "❌ 回答超时，请缩短问题或稍后重试。"
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text[:500] if e.response is not None else str(e)
+        status = e.response.status_code if e.response is not None else 0
+        return _format_api_error(status, detail, api_key, base_url)
+    except Exception as e:
+        return f"❌ 调用大模型时发生错误：{e}"
+
+
 def call_llm(api_key: str, base_url: str, model_name: str,
               system_prompt: str, user_content: str, temperature: float = 0.5,
               extracted_data: dict = None) -> str:
@@ -2218,6 +2333,8 @@ def main(*, embedded: bool = False) -> None:
         st.session_state["sheets"] = sheets
         st.session_state["file_id"] = (uploaded_file.name, uploaded_file.size)
         st.session_state.pop("report", None)  # 新文件，清空旧报告
+        st.session_state.pop("report_extracted_data", None)
+        st.session_state.pop("followup_messages", None)
 
     sheets = st.session_state.get("sheets", {})
 
@@ -2433,6 +2550,8 @@ def main(*, embedded: bool = False) -> None:
                     "date_info": date_info,
                     "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 }
+                st.session_state["report_extracted_data"] = extracted_data
+                st.session_state["followup_messages"] = []
 
             except Exception as e:
                 st.error(f"❌ 生成报告过程中发生未预期错误：{e}")
@@ -2515,6 +2634,59 @@ def main(*, embedded: bool = False) -> None:
                     st.success(message)
                 else:
                     st.error(message)
+
+        # ---------------- 具体提问（不纳入邮件） ----------------
+        st.markdown("---")
+        st.subheader("💬 具体提问")
+        st.caption(
+            "基于当前 Excel 数据与上方 AI 报告继续追问；"
+            "**本模块对话不会写入邮件或下载附件。**"
+        )
+
+        followup_messages = st.session_state.setdefault("followup_messages", [])
+        extracted_for_qa = st.session_state.get("report_extracted_data")
+
+        if not extracted_for_qa:
+            st.info("请先生成 AI 分析报告后再提问。")
+        else:
+            for msg in followup_messages:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+            col_clear, _ = st.columns([1, 5])
+            with col_clear:
+                if st.button("清空对话", use_container_width=True):
+                    st.session_state["followup_messages"] = []
+                    st.rerun()
+
+            question = st.chat_input(
+                "输入问题，例如：WearNuage 账号 ROAS 下降的主要原因？Google 是否值得加预算？",
+                key="followup_chat_input",
+            )
+            if question:
+                if not api_key:
+                    st.error("❌ 请先在侧边栏填写 Gemini API Key。")
+                else:
+                    with st.spinner("AI 正在思考..."):
+                        reply = answer_followup_question(
+                            api_key=api_key,
+                            base_url=base_url,
+                            model_name=model_name,
+                            temperature=temperature,
+                            extracted_data=extracted_for_qa,
+                            report_text=report_body,
+                            date_info=meta.get("date_info", ""),
+                            report_type=meta.get("report_type", ""),
+                            question=question,
+                            history=followup_messages,
+                        )
+                    st.session_state["followup_messages"].append(
+                        {"role": "user", "content": question}
+                    )
+                    st.session_state["followup_messages"].append(
+                        {"role": "assistant", "content": reply}
+                    )
+                    st.rerun()
 
 
 if __name__ == "__main__":
