@@ -45,11 +45,27 @@ os.environ.setdefault("PYTHONUTF8", "1")
 DATE_PATTERN = re.compile(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}')
 WEEKEND_LABEL_RE = re.compile(r'周末|weekend', re.I)
 WEEK_LABEL_RE = re.compile(r'^week(?:\s*\d+)?$', re.I)
+EXCEL_SERIAL_MIN = 35000
+EXCEL_SERIAL_MAX = 55000
 SKIP_ROW_LABEL_RE = re.compile(
     r'^(february?|january|march|april|may|june|july|august|'
     r'september|october|november|december|日期|date)$',
     re.I,
 )
+
+
+def _try_excel_serial_date(val):
+    """Excel 日期序列号（常见于 .xlsx 被读成 float，如 45474）。"""
+    try:
+        if isinstance(val, (int, float, np.integer, np.floating)) and not isinstance(val, bool):
+            if isinstance(val, float) and np.isnan(val):
+                return None
+            n = float(val)
+            if EXCEL_SERIAL_MIN <= n <= EXCEL_SERIAL_MAX:
+                return pd.to_datetime(n, unit="D", origin="1899-12-30").date()
+    except Exception:
+        pass
+    return None
 
 
 def is_valid_date(val) -> bool:
@@ -73,9 +89,9 @@ def is_valid_date(val) -> bool:
     if isinstance(val, (pd.Timestamp, datetime, date)):
         return True
 
-    # 纯数字（int/float/numpy数字）不视为日期，避免把"周数"误判为日期
+    # 纯数字：优先识别 Excel 日期序列号，避免与周数混淆
     if isinstance(val, (int, float, np.integer, np.floating)):
-        return False
+        return _try_excel_serial_date(val) is not None
 
     s = str(val).strip()
     if not s:
@@ -97,6 +113,9 @@ def to_date(val):
             return val.date()
         if isinstance(val, date):
             return val
+        serial_d = _try_excel_serial_date(val)
+        if serial_d:
+            return serial_d
         return pd.to_datetime(str(val).strip()).date()
     except Exception:
         return None
@@ -175,6 +194,9 @@ def parse_any_date(val, ref_dates: list = None):
         return to_date(val)
     if is_md_dot_date(val):
         return md_dot_to_date(val, ref_dates)
+    serial_d = _try_excel_serial_date(val)
+    if serial_d:
+        return serial_d
     return None
 
 
@@ -245,7 +267,61 @@ def collect_reference_dates(df: pd.DataFrame, date_col) -> list:
             d = to_date(val)
             if d:
                 refs.append(d)
+            continue
+        serial_d = _try_excel_serial_date(val)
+        if serial_d:
+            refs.append(serial_d)
     return sorted(set(refs))
+
+
+def collect_all_parseable_dates(df: pd.DataFrame, date_col) -> list:
+    """收集 Sheet 日期列中所有可解析日期（含 M.DD 短日期）。"""
+    refs = collect_reference_dates(df, date_col)
+    for val in df[date_col]:
+        if is_skip_row_label(val) or is_week_label(val) or is_weekend_label(val):
+            continue
+        d = parse_any_date(val, refs)
+        if d:
+            refs.append(d)
+    return sorted(set(refs))
+
+
+def collect_dates_from_all_sheets(sheets_dict: dict) -> list:
+    """从所有 Sheet 汇总可解析日期，供 Week 范围回退匹配。"""
+    all_dates = []
+    for df in (sheets_dict or {}).values():
+        if df is None or df.empty:
+            continue
+        cleaned = clean_columns(df.copy())
+        date_col = find_date_column(cleaned)
+        if date_col is None:
+            continue
+        all_dates.extend(collect_all_parseable_dates(cleaned, date_col))
+    return sorted(set(all_dates))
+
+
+def _group_dates_by_iso_week(dates: list) -> list:
+    groups: dict = {}
+    for d in dates:
+        key = (d.isocalendar().year, d.isocalendar().week)
+        groups.setdefault(key, []).append(d)
+    return [groups[k] for k in sorted(groups.keys())]
+
+
+def iso_week_range_for_bucket(week_pos: int, num_buckets: int, all_dates: list):
+    """按 Week 汇总行顺序，与全局 ISO 周分组对齐（从最近一周往前匹配）。"""
+    groups = _group_dates_by_iso_week(all_dates)
+    if not groups or num_buckets <= 0:
+        return None, None
+    if len(groups) >= num_buckets:
+        aligned = groups[-num_buckets:]
+        if week_pos < len(aligned):
+            g = aligned[week_pos]
+            return min(g), max(g)
+    if week_pos < len(groups):
+        g = groups[week_pos]
+        return min(g), max(g)
+    return None, None
 
 
 def build_parsed_date_series(df: pd.DataFrame, date_col) -> pd.Series:
@@ -328,6 +404,147 @@ def infer_weekend_range(cleaned_df: pd.DataFrame, date_col, row_idx: int):
     return None, None
 
 
+def infer_week_range(
+    cleaned_df: pd.DataFrame,
+    date_col,
+    row_idx: int,
+    week_row_indices: list = None,
+    all_dates: list = None,
+):
+    """
+    根据 Week 汇总行在表中的位置，推断对应周的日期范围。
+    1) 取「上一个 Week 行 ~ 当前 Week 行」之间所有可解析日期
+    2) 若无则取当前 Week 行 ~ 下一个 Week 行之间
+    3) 再按 Week N 的 ISO 周序号匹配
+    4) 最后按 Week 行顺序与全局 ISO 周分组对齐（跨 Sheet 回退）
+    """
+    refs = collect_all_parseable_dates(cleaned_df, date_col)
+    if all_dates:
+        refs = sorted(set(refs) | set(all_dates))
+
+    week_row_indices = week_row_indices or [
+        i for i, val in enumerate(cleaned_df[date_col]) if is_week_label(val)
+    ]
+    if row_idx not in week_row_indices:
+        return None, None
+
+    pos = week_row_indices.index(row_idx)
+    week_val = cleaned_df.iloc[row_idx][date_col]
+    week_num = parse_week_number(week_val)
+
+    def _dates_between(start_row: int, end_row: int) -> list:
+        found = []
+        for i in range(start_row, end_row):
+            if i < 0 or i >= len(cleaned_df):
+                continue
+            d = parse_any_date(cleaned_df.iloc[i][date_col], refs)
+            if d:
+                found.append(d)
+        return found
+
+    prev_week = week_row_indices[pos - 1] if pos > 0 else -1
+    before_dates = _dates_between(prev_week + 1, row_idx)
+    if before_dates:
+        iso_groups = _group_dates_by_iso_week(before_dates)
+        num_weeks = len(week_row_indices)
+        # 多个 Week 行堆在底部、上方是一大段逐日数据时，按 ISO 周切分
+        if len(before_dates) > 8 and len(iso_groups) > 1:
+            if len(iso_groups) >= num_weeks:
+                aligned = iso_groups[-num_weeks:]
+                if pos < len(aligned):
+                    g = aligned[pos]
+                    return min(g), max(g)
+            if pos < len(iso_groups):
+                g = iso_groups[pos]
+                return min(g), max(g)
+        return min(before_dates), max(before_dates)
+
+    next_week = (
+        week_row_indices[pos + 1]
+        if pos + 1 < len(week_row_indices)
+        else len(cleaned_df)
+    )
+    after_dates = _dates_between(row_idx + 1, next_week)
+    if after_dates:
+        return min(after_dates), max(after_dates)
+
+    if week_num is not None and refs:
+        iso_dates = [d for d in refs if d.isocalendar().week == week_num]
+        if iso_dates:
+            return min(iso_dates), max(iso_dates)
+
+    if all_dates and week_row_indices:
+        return iso_week_range_for_bucket(pos, len(week_row_indices), all_dates)
+
+    return None, None
+
+
+def format_week_bucket_label(bucket: dict) -> str:
+    """格式化 Week 选项文案，含日期范围便于定位。"""
+    raw = bucket.get("raw_label", "Week")
+    start = bucket.get("start")
+    end = bucket.get("end")
+    if start and end:
+        if start == end:
+            return f"{raw}（{start.strftime('%Y-%m-%d')}）"
+        return f"{raw}（{start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}）"
+    if bucket.get("week_number") is not None:
+        return f"Week {bucket['week_number']}（周汇总）"
+    return f"{raw}（周汇总）"
+
+
+def build_week_buckets_from_valid_dates(valid_dates: list) -> list:
+    """用逐日数据按 ISO 周生成 Week 选项（始终带日期范围，避免 Excel 重复 Week 行）。"""
+    if not valid_dates:
+        return []
+    groups = _group_dates_by_iso_week(valid_dates)
+    buckets = []
+    for i, g in enumerate(groups):
+        start, end = min(g), max(g)
+        wn = start.isocalendar().week
+        buckets.append({
+            "bucket_index": i,
+            "raw_label": f"Week {wn}",
+            "week_number": wn,
+            "iso_year": start.isocalendar().year,
+            "start": start,
+            "end": end,
+            "from_valid_dates": True,
+        })
+    return buckets
+
+
+def resolve_week_buckets_for_ui(sheets_dict: dict, valid_dates: list) -> list:
+    """优先用逐日数据生成带日期范围的 Week 列表；无逐日数据时回退 Excel Week 行。"""
+    if valid_dates:
+        return build_week_buckets_from_valid_dates(valid_dates)
+    return get_week_buckets(sheets_dict)
+
+
+def enrich_week_buckets(week_buckets: list, sheets_dict: dict) -> list:
+    """为缺少日期范围的 Week 选项，用全局可解析日期按 ISO 周补齐。"""
+    if not week_buckets:
+        return week_buckets
+
+    valid_dates = get_valid_dates(sheets_dict)
+    if not valid_dates:
+        valid_dates = collect_dates_from_all_sheets(sheets_dict)
+    if not valid_dates:
+        return week_buckets
+
+    num = len(week_buckets)
+    enriched = []
+    for bucket in week_buckets:
+        nb = dict(bucket)
+        if not (nb.get("start") and nb.get("end")):
+            start, end = iso_week_range_for_bucket(nb["bucket_index"], num, valid_dates)
+            if start and end:
+                nb["start"] = start
+                nb["end"] = end
+        enriched.append(nb)
+    return enriched
+
+
 def get_weekend_buckets(sheets_dict: dict) -> list:
     """从 Shopify Sheet 扫描所有「周末三日」汇总段，返回可选 bucket 列表。"""
     try:
@@ -385,18 +602,32 @@ def get_week_buckets(sheets_dict: dict) -> list:
             return []
 
         buckets = []
-        for idx, val in enumerate(cleaned_df[date_col]):
-            if not is_week_label(val):
-                continue
-            label = str(val).strip()
-            buckets.append({
+        week_row_indices = [
+            i for i, val in enumerate(cleaned_df[date_col]) if is_week_label(val)
+        ]
+        all_dates = collect_dates_from_all_sheets(sheets_dict)
+
+        for idx in week_row_indices:
+            label = str(cleaned_df.iloc[idx][date_col]).strip()
+            start, end = infer_week_range(
+                cleaned_df,
+                date_col,
+                idx,
+                week_row_indices=week_row_indices,
+                all_dates=all_dates,
+            )
+            bucket = {
                 "bucket_index": len(buckets),
                 "raw_label": label,
                 "week_number": parse_week_number(label),
                 "row_index": idx,
                 "source_sheet": source_name,
-            })
-        return buckets
+            }
+            if start and end:
+                bucket["start"] = start
+                bucket["end"] = end
+            buckets.append(bucket)
+        return enrich_week_buckets(buckets, sheets_dict)
     except Exception as e:
         st.warning(f"⚠️ 扫描 Week 周汇总行时出错：{e}")
         return []
@@ -423,20 +654,58 @@ def _filter_week_rows(cleaned_df: pd.DataFrame, date_col, bucket: dict) -> pd.Da
     """在各 Sheet 中定位与 bucket 对应的「Week」周汇总行。"""
     raw = cleaned_df[date_col]
     week_indices = [i for i, val in enumerate(raw) if is_week_label(val)]
+    if not week_indices:
+        return pd.DataFrame()
 
-    bucket_idx = bucket["bucket_index"]
+    b_start = bucket.get("start")
+    b_end = bucket.get("end")
+    b_week_num = bucket.get("week_number")
+    all_dates = collect_all_parseable_dates(cleaned_df, date_col)
+
+    best_idx = None
+    best_score = -1
+    for i in week_indices:
+        val = raw.iloc[i]
+        wn = parse_week_number(val)
+        if b_week_num is not None and wn is not None and wn != b_week_num:
+            continue
+
+        if b_start and b_end:
+            row_start, row_end = infer_week_range(
+                cleaned_df,
+                date_col,
+                i,
+                week_row_indices=week_indices,
+                all_dates=all_dates,
+            )
+            if row_start and row_end:
+                overlap_start = max(row_start, b_start)
+                overlap_end = min(row_end, b_end)
+                if overlap_start <= overlap_end:
+                    score = (overlap_end - overlap_start).days
+                    if score > best_score:
+                        best_score = score
+                        best_idx = i
+            elif b_week_num is not None and wn == b_week_num and best_idx is None:
+                best_idx = i
+        elif b_week_num is not None and wn == b_week_num:
+            return cleaned_df.iloc[[i]]
+
+    if best_idx is not None:
+        return cleaned_df.iloc[[best_idx]]
+
+    bucket_idx = bucket.get("bucket_index", 0)
     if bucket_idx < len(week_indices):
         return cleaned_df.iloc[[week_indices[bucket_idx]]]
 
-    label = bucket["raw_label"]
+    label = bucket.get("raw_label", "")
     label_matches = cleaned_df[raw.astype(str).str.strip().str.lower() == label.lower()]
     if not label_matches.empty:
         return label_matches.iloc[[0]]
 
-    week_num = bucket.get("week_number")
-    if week_num is not None:
+    if b_week_num is not None:
         for i, val in enumerate(raw):
-            if is_week_label(val) and parse_week_number(val) == week_num:
+            if is_week_label(val) and parse_week_number(val) == b_week_num:
                 return cleaned_df.iloc[[i]]
 
     return pd.DataFrame()
@@ -662,9 +931,13 @@ def find_date_column(df: pd.DataFrame):
 
     best_col = df.columns[0]
     best_count = -1
-    for col in df.columns[: min(3, len(df.columns))]:
+    for col in df.columns[: min(5, len(df.columns))]:
         try:
-            count = df[col].apply(is_valid_date).sum()
+            refs = collect_reference_dates(df, col)
+            count = sum(
+                1 for v in df[col]
+                if parse_any_date(v, refs) is not None
+            )
             if count > best_count:
                 best_count = count
                 best_col = col
@@ -1211,11 +1484,16 @@ def resolve_previous_period(
             return None
         prev_bucket = week_buckets[idx - 1]
         wn = prev_bucket.get("week_number")
-        label = (
-            f"Week {wn}（上一周）"
-            if wn is not None
-            else f"{prev_bucket.get('raw_label', '上一周')}（上一周）"
-        )
+        if prev_bucket.get("start") and prev_bucket.get("end"):
+            label = (
+                f"{prev_bucket.get('raw_label', 'Week')}（"
+                f"{prev_bucket['start'].strftime('%Y-%m-%d')} ~ "
+                f"{prev_bucket['end'].strftime('%Y-%m-%d')}）（上一周）"
+            )
+        elif wn is not None:
+            label = f"Week {wn}（上一周）"
+        else:
+            label = f"{prev_bucket.get('raw_label', '上一周')}（上一周）"
         return ({"week_bucket": prev_bucket}, label)
 
     if date_mode == "weekend":
@@ -1720,8 +1998,33 @@ def _validate_llm_credentials(api_key: str, base_url: str) -> None:
 
 
 def _sanitize_api_key(api_key: str) -> str:
-    """去除首尾空格及误粘贴的引号。"""
-    return api_key.strip().strip('"').strip("'").strip()
+    """去除首尾空格/引号/不可见字符，并尽量提取有效 Gemini Key（AIza...）。"""
+    raw = (api_key or "").strip().strip('"').strip("'").strip()
+    if not raw:
+        return ""
+
+    raw = re.sub(r"[\u200b-\u200d\ufeff\u00a0]", "", raw)
+
+    match = re.search(r"AIza[0-9A-Za-z_-]{20,}", raw)
+    if match:
+        return match.group(0)
+
+    return ""
+
+
+def _gemini_key_error_hint(raw_key: str) -> str:
+    """当 Key 无法解析时，生成可操作的中文提示。"""
+    if not (raw_key or "").strip():
+        return "请先在左侧侧边栏填写 Gemini API Key（以 AIza 开头）。"
+    if re.search(r"[\u4e00-\u9fff]", raw_key):
+        return (
+            "检测到 Key 中含中文，可能是误粘贴了说明文字。"
+            "请只保留以 **AIza** 开头的英文 Key。"
+        )
+    return (
+        "Gemini API Key 格式无效。"
+        "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制以 **AIza** 开头的 Key。"
+    )
 
 
 def _format_api_error(status: int, detail: str, api_key: str, base_url: str) -> str:
@@ -1860,6 +2163,7 @@ def generate_report(
     previous_extracted_data: dict = None,
     current_period_label: str = "",
     previous_period_label: str = "",
+    report_sections: Optional[list] = None,
 ) -> str:
     """
     分四节依次调用大模型，再合并为完整报告，避免单次输出被截断。
@@ -1884,6 +2188,7 @@ def generate_report(
     }
     timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
     report_temperature = min(temperature, 0.4)
+    sections_plan = report_sections or REPORT_SECTIONS
 
     sections_out = []
     comparison_tables = build_period_comparison_markdown(
@@ -1894,7 +2199,7 @@ def generate_report(
     )
     try:
         with httpx.Client(timeout=timeout) as client:
-            for section in REPORT_SECTIONS:
+            for section in sections_plan:
                 if section.get("id") == "comparison":
                     if "跳过环比" in comparison_tables or "未找到上一周期" in comparison_tables:
                         sections_out.append(comparison_tables)
@@ -2041,6 +2346,7 @@ def answer_followup_question(
     report_type: str,
     question: str,
     history: Optional[list] = None,
+    system_prompt: Optional[str] = None,
 ) -> str:
     """基于同一批数据与已生成报告，回答用户的追问（单次 API 调用）。"""
     if not api_key:
@@ -2056,7 +2362,7 @@ def answer_followup_question(
     context_block = _build_followup_context(
         extracted_data, report_text, date_info, report_type
     )
-    messages = [{"role": "system", "content": build_followup_system_prompt()}]
+    messages = [{"role": "system", "content": system_prompt or build_followup_system_prompt()}]
     history = history or []
 
     if not history:
@@ -2531,10 +2837,18 @@ def main(*, embedded: bool = False) -> None:
     smtp_ready = bool(_get_smtp_config(smtp_override))
 
     # ---------------- 主区：文件上传 ----------------
-    uploaded_file = st.file_uploader("📁 上传广告投放数据文件 (.xlsx / .csv)", type=["xlsx", "csv"])
+    uploaded_file = st.file_uploader(
+        "📁 上传广告投放数据文件（单个 .xlsx / .csv）",
+        type=["xlsx", "csv"],
+        accept_multiple_files=False,
+        help="每次仅上传一个文件。若使用 Excel，可在同一文件内包含多个 Sheet（Shopify、Google、Meta 等）。",
+    )
 
     if uploaded_file is None:
-        st.info("请上传包含 Shopify / Google / Meta / AppLovin 等 Sheet 的 Excel 文件，或单表 CSV 文件。")
+        st.info(
+            "请上传**一个** Excel 或 CSV 文件。"
+            "Excel 可在同一工作簿内包含多个 Sheet（如 Shopify / Google / Meta / AppLovin），无需分多个文件上传。"
+        )
         return
 
     # 文件变更时重置缓存
@@ -2556,7 +2870,9 @@ def main(*, embedded: bool = False) -> None:
         st.error("❌ 未能从文件中解析出任何有效数据，请检查文件格式。")
         return
 
-    st.success(f"✅ 成功解析 {len(sheets)} 个数据表：{', '.join(sheets.keys())}")
+    st.success(
+        f"✅ 已加载 1 个文件，内含 {len(sheets)} 个工作表（Sheet）：{', '.join(sheets.keys())}"
+    )
 
     with st.expander("🔍 查看各 Sheet 数据预览（前5行，已剔除总结/分析列）"):
         for name, df in sheets.items():
@@ -2576,7 +2892,7 @@ def main(*, embedded: bool = False) -> None:
 
     valid_dates = get_valid_dates(sheets)
     weekend_buckets = get_weekend_buckets(sheets)
-    week_buckets = get_week_buckets(sheets)
+    week_buckets = resolve_week_buckets_for_ui(sheets, valid_dates)
 
     if not valid_dates and not weekend_buckets and not week_buckets:
         st.error("❌ 无法从数据中提取到有效日期、Week 周汇总或周末汇总行，请检查 Excel。")
@@ -2670,18 +2986,13 @@ def main(*, embedded: bool = False) -> None:
                     date_info = f"{start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')}"
 
         elif date_mode == "week":
-            def _format_week_bucket(b):
-                if b.get("week_number") is not None:
-                    return f"Week {b['week_number']}（周汇总）"
-                return f"{b['raw_label']}（周汇总）"
-
             week_bucket = st.selectbox(
                 "选择 Week 周汇总",
                 options=week_buckets,
                 index=len(week_buckets) - 1,
-                format_func=_format_week_bucket,
+                format_func=format_week_bucket_label,
             )
-            date_info = _format_week_bucket(week_bucket)
+            date_info = format_week_bucket_label(week_bucket)
 
         elif date_mode == "weekend":
             def _format_weekend_bucket(b):
@@ -2705,9 +3016,11 @@ def main(*, embedded: bool = False) -> None:
             f"📌 标准日期：{min(valid_dates)} ~ {max(valid_dates)}，共 {len(valid_dates)} 天"
         )
     if week_buckets:
-        labels = ", ".join(b["raw_label"] for b in week_buckets[:8])
-        suffix = "..." if len(week_buckets) > 8 else ""
-        st.caption(f"📌 检测到 {len(week_buckets)} 个 Week 周汇总行：{labels}{suffix}")
+        recent = ", ".join(format_week_bucket_label(b) for b in week_buckets[-4:])
+        st.caption(
+            f"📌 可用 Week 周区间 {len(week_buckets)} 个（由逐日数据生成，含日期范围）；"
+            f"最近：{recent}"
+        )
     if weekend_buckets:
         st.caption(f"📌 检测到 {len(weekend_buckets)} 个「周末三日」汇总段")
 
@@ -2716,8 +3029,9 @@ def main(*, embedded: bool = False) -> None:
     generate_btn = st.button("🚀 生成 AI 分析报告", type="primary", use_container_width=False)
 
     if generate_btn:
-        if not api_key:
-            st.error("❌ 请先在左侧侧边栏填写 Gemini API Key。")
+        clean_api_key = _sanitize_api_key(api_key)
+        if not clean_api_key:
+            st.error(f"❌ {_gemini_key_error_hint(api_key)}")
         else:
             try:
                 with st.spinner("正在提取多渠道数据..."):
@@ -2770,7 +3084,7 @@ def main(*, embedded: bool = False) -> None:
                     system_prompt = build_system_prompt(report_type, date_mode)
                     user_content = build_user_content(extracted_data, date_info, date_mode)
                     report = generate_report(
-                        api_key=api_key,
+                        api_key=clean_api_key,
                         base_url=base_url,
                         model_name=model_name,
                         system_prompt=system_prompt,
@@ -2902,12 +3216,13 @@ def main(*, embedded: bool = False) -> None:
                 key="followup_chat_input",
             )
             if question:
-                if not api_key:
-                    st.error("❌ 请先在侧边栏填写 Gemini API Key。")
+                followup_key = _sanitize_api_key(api_key)
+                if not followup_key:
+                    st.error(f"❌ {_gemini_key_error_hint(api_key)}")
                 else:
                     with st.spinner("AI 正在思考..."):
                         reply = answer_followup_question(
-                            api_key=api_key,
+                            api_key=followup_key,
                             base_url=base_url,
                             model_name=model_name,
                             temperature=temperature,
