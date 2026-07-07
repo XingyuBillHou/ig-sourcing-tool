@@ -35,6 +35,7 @@ from fb_competitor_ad_core import (  # noqa: E402
     render_fb_competitor_tool,
 )
 from suite_shared import (
+    GEMINI_KEY_VALIDATION_VERSION,
     SUITE_GEMINI_API_KEY,
     SUITE_SMTP_FROM_NAME,
     SUITE_SMTP_HOST,
@@ -42,6 +43,7 @@ from suite_shared import (
     SUITE_SMTP_PORT,
     SUITE_SMTP_USER,
     SUITE_TITLE,
+    describe_gemini_key_input,
     get_gemini_api_key,
     is_gemini_auth_key,
     sanitize_gemini_api_key,
@@ -123,7 +125,12 @@ def _render_shared_sidebar() -> None:
             else:
                 st.caption(f"✅ Gemini Key 有效（来源：Secrets，{key_type}）")
         elif secret("gemini", "api_key"):
-            st.caption("⚠️ Secrets 中 gemini.api_key 格式无效，请检查是否为 AIza 或 AQ. 开头的完整 Key")
+            st.caption(
+                "⚠️ Secrets 中 gemini.api_key 格式无效："
+                f"{describe_gemini_key_input(secret('gemini', 'api_key'))}"
+            )
+
+        st.caption(f"Key 校验版本：{GEMINI_KEY_VALIDATION_VERSION}")
 
         col_proxy, col_redetect = st.columns([3, 1])
         with col_proxy:

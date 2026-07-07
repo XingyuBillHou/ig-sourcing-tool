@@ -28,10 +28,12 @@ import pandas as pd
 import streamlit as st
 
 from suite_shared import (
+    GEMINI_KEY_VALIDATION_VERSION,
     SUITE_GEMINI_API_KEY,
     SUITE_SMTP_PASSWORD,
     SUITE_SMTP_USER,
     build_gemini_http_headers,
+    describe_gemini_key_input,
     get_gemini_api_key,
     is_gemini_auth_key,
     sanitize_gemini_api_key,
@@ -2047,11 +2049,14 @@ def _gemini_key_error_hint(raw_key: str = "") -> str:
     if sidebar_raw and not sanitize_gemini_api_key(sidebar_raw):
         return (
             "侧边栏 Gemini API Key 格式无效。"
+            f"当前输入：{describe_gemini_key_input(sidebar_raw)}。"
             "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key"
             "（新版以 **AQ.** 开头，旧版以 **AIzaSy** 开头）。"
         )
     return (
         "Gemini API Key 格式无效。"
+        f"侧栏：{describe_gemini_key_input(sidebar_raw)}；"
+        f"Secrets：{describe_gemini_key_input(secret_raw)}。"
         "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key"
         "（新版以 **AQ.** 开头，旧版以 **AIzaSy** 开头）。"
     )
@@ -2222,27 +2227,16 @@ def _request_llm_completion(
     max_output_tokens: int,
     retry_delays: tuple,
 ) -> dict:
-    """AQ. Auth Key 走原生 Gemini；AIza 标准 Key 可继续走 OpenAI 兼容端点。"""
-    if is_gemini_auth_key(api_key):
-        return _request_gemini_generate_content(
-            client,
-            api_key,
-            model_name,
-            messages,
-            temperature,
-            max_output_tokens,
-            retry_delays,
-        )
-
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    headers = build_gemini_http_headers(api_key, for_openai_compat=True)
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_output_tokens,
-    }
-    return _request_chat_completion(client, url, headers, payload, retry_delays)
+    """统一走 Gemini 原生 generateContent，兼容 AQ. 与 AIza 两类 Key。"""
+    return _request_gemini_generate_content(
+        client,
+        api_key,
+        model_name,
+        messages,
+        temperature,
+        max_output_tokens,
+        retry_delays,
+    )
 
 
 REPORT_SECTIONS = [

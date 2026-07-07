@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 import streamlit as st
 
@@ -15,10 +16,26 @@ SUITE_SMTP_PORT = "suite_smtp_port"
 SUITE_SMTP_USER = "suite_smtp_user"
 SUITE_SMTP_PASSWORD = "suite_smtp_password"
 SUITE_SMTP_FROM_NAME = "suite_smtp_from_name"
+GEMINI_KEY_VALIDATION_VERSION = "2026-07-07b"
 
 GEMINI_STANDARD_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
-GEMINI_AUTH_KEY_PATTERN = re.compile(r"AQ\.[A-Za-z0-9._+=/-]{8,}", re.I)
+GEMINI_AUTH_KEY_PATTERN = re.compile(r"AQ\.[!-~]{8,}", re.I)
 GEMINI_AUTH_KEY_PREFIX = re.compile(r"(?i)^aq\.")
+
+
+def _normalize_key_input(raw: str) -> str:
+    text = unicodedata.normalize("NFKC", raw or "")
+    text = text.strip().strip('"').strip("'").strip()
+    text = re.sub(r"[\u200b-\u200d\ufeff\u00a0]", "", text)
+    text = text.strip("[](){}<>`")
+    for src, dst in (
+        ("\u2024", "."),
+        ("\uff0e", "."),
+        ("\u00b7", "."),
+        ("．", "."),
+    ):
+        text = text.replace(src, dst)
+    return text
 
 
 def is_gemini_auth_key(api_key: str) -> bool:
@@ -34,27 +51,33 @@ def _normalize_gemini_auth_key(key: str) -> str:
 
 def sanitize_gemini_api_key(api_key: str) -> str:
     """去除杂质并提取 Gemini API Key（支持 AIza 标准 Key 与 AQ. Auth Key）。"""
-    raw = (api_key or "").strip().strip('"').strip("'").strip()
+    raw = _normalize_key_input(api_key)
     if not raw:
         return ""
-
-    raw = re.sub(r"[\u200b-\u200d\ufeff\u00a0]", "", raw)
-    raw = raw.strip("[](){}<>`")
 
     for pattern in (GEMINI_AUTH_KEY_PATTERN, GEMINI_STANDARD_KEY_PATTERN):
         match = pattern.search(raw)
         if match:
-            return _normalize_gemini_auth_key(match.group(0))
+            return _normalize_gemini_auth_key(match.group(0).rstrip(".,;"))
 
     compact = re.sub(r"\s+", "", raw)
     for pattern in (GEMINI_AUTH_KEY_PATTERN, GEMINI_STANDARD_KEY_PATTERN):
-        if pattern.fullmatch(compact):
-            return _normalize_gemini_auth_key(compact)
+        if pattern.fullmatch(compact.rstrip(".,;")):
+            return _normalize_gemini_auth_key(compact.rstrip(".,;"))
 
-    if GEMINI_AUTH_KEY_PREFIX.match(compact):
-        body = re.sub(r"[^A-Za-z0-9._+=/-]", "", compact[3:])
-        if len(body) >= 8:
-            return f"AQ.{body}"
+    if GEMINI_AUTH_KEY_PREFIX.match(compact) and len(compact) >= 12:
+        return _normalize_gemini_auth_key(compact.rstrip(".,;"))
+
+    if compact.upper().startswith("AIZA") and len(compact) >= 35:
+        return compact
+
+    loose_auth = re.search(r"(?i)aq\.[!-~]{8,}", compact)
+    if loose_auth:
+        return _normalize_gemini_auth_key(loose_auth.group(0).rstrip(".,;"))
+
+    loose_std = re.search(r"(?i)AIza[0-9A-Za-z_-]{20,}", compact)
+    if loose_std:
+        return loose_std.group(0)
 
     return ""
 
@@ -113,8 +136,21 @@ def get_gemini_api_key() -> str:
         st.session_state.get(SUITE_GEMINI_API_KEY, ""),
         secret("gemini", "api_key"),
     ]
+    best = ""
     for raw in candidates:
         clean = sanitize_gemini_api_key(raw)
-        if clean:
-            return clean
-    return ""
+        if clean and len(clean) > len(best):
+            best = clean
+    return best
+
+
+def describe_gemini_key_input(raw: str) -> str:
+    """生成不含完整密钥的诊断信息，便于排查格式问题。"""
+    text = _normalize_key_input(raw)
+    if not text:
+        return "（空）"
+    compact = re.sub(r"\s+", "", text)
+    prefix = compact[:6]
+    if len(compact) > 6:
+        prefix += "…"
+    return f"长度 {len(compact)}，前缀 `{prefix}`"
