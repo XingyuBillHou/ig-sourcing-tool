@@ -16,6 +16,27 @@ SUITE_SMTP_USER = "suite_smtp_user"
 SUITE_SMTP_PASSWORD = "suite_smtp_password"
 SUITE_SMTP_FROM_NAME = "suite_smtp_from_name"
 
+GEMINI_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
+
+
+def sanitize_gemini_api_key(api_key: str) -> str:
+    """去除杂质并提取 AIza... 形态的 Gemini API Key。"""
+    raw = (api_key or "").strip().strip('"').strip("'").strip()
+    if not raw:
+        return ""
+
+    raw = re.sub(r"[\u200b-\u200d\ufeff\u00a0]", "", raw)
+
+    match = GEMINI_KEY_PATTERN.search(raw)
+    if match:
+        return match.group(0)
+
+    compact = re.sub(r"\s+", "", raw)
+    if GEMINI_KEY_PATTERN.fullmatch(compact):
+        return compact
+
+    return ""
+
 
 def secret(section: str, key: str, default: str = "") -> str:
     """Read from env vars or st.secrets (same layout as tool apps)."""
@@ -51,8 +72,13 @@ def secret(section: str, key: str, default: str = "") -> str:
 
 
 def get_gemini_api_key() -> str:
-    return (
-        st.session_state.get(SUITE_GEMINI_API_KEY, "")
-        or secret("gemini", "api_key")
-        or ""
-    ).strip()
+    """侧边栏优先；无效或留空时回退 Secrets / 环境变量，并统一清洗。"""
+    candidates = [
+        st.session_state.get(SUITE_GEMINI_API_KEY, ""),
+        secret("gemini", "api_key"),
+    ]
+    for raw in candidates:
+        clean = sanitize_gemini_api_key(raw)
+        if clean:
+            return clean
+    return ""

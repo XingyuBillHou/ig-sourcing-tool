@@ -32,6 +32,8 @@ from suite_shared import (
     SUITE_SMTP_PASSWORD,
     SUITE_SMTP_USER,
     get_gemini_api_key,
+    sanitize_gemini_api_key,
+    secret as suite_secret,
 )
 
 # 避免 macOS 默认 locale 下 HTTP 请求体中文被按 ASCII 编码
@@ -1998,32 +2000,51 @@ def _validate_llm_credentials(api_key: str, base_url: str) -> None:
 
 
 def _sanitize_api_key(api_key: str) -> str:
-    """去除首尾空格/引号/不可见字符，并尽量提取有效 Gemini Key（AIza...）。"""
-    raw = (api_key or "").strip().strip('"').strip("'").strip()
-    if not raw:
-        return ""
-
-    raw = re.sub(r"[\u200b-\u200d\ufeff\u00a0]", "", raw)
-
-    match = re.search(r"AIza[0-9A-Za-z_-]{20,}", raw)
-    if match:
-        return match.group(0)
-
-    return ""
+    return sanitize_gemini_api_key(api_key)
 
 
-def _gemini_key_error_hint(raw_key: str) -> str:
+def _raw_gemini_key_candidates() -> list[str]:
+    return [
+        st.session_state.get(SUITE_GEMINI_API_KEY, ""),
+        suite_secret("gemini", "api_key"),
+    ]
+
+
+def _gemini_key_error_hint(raw_key: str = "") -> str:
     """当 Key 无法解析时，生成可操作的中文提示。"""
-    if not (raw_key or "").strip():
-        return "请先在左侧侧边栏填写 Gemini API Key（以 AIza 开头）。"
-    if re.search(r"[\u4e00-\u9fff]", raw_key):
+    raw_candidates = [raw_key] if (raw_key or "").strip() else _raw_gemini_key_candidates()
+    raw = next((str(r).strip() for r in raw_candidates if str(r).strip()), "")
+
+    if not raw:
+        return (
+            "请先在左侧侧边栏填写 Gemini API Key（以 AIza 开头），"
+            "或在 Streamlit Secrets 的 [gemini] api_key 中配置。"
+        )
+    if re.search(r"[\u4e00-\u9fff]", raw):
         return (
             "检测到 Key 中含中文，可能是误粘贴了说明文字。"
             "请只保留以 **AIza** 开头的英文 Key。"
         )
+    lowered = raw.lower()
+    if "xxxx" in lowered:
+        return (
+            "检测到占位符或示例 Key（含 xxxx）。"
+            "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制真实 Key。"
+        )
+    if lowered.startswith("apify"):
+        return "误填了 Apify Token。请在「Google Gemini API Key」栏填写以 **AIza** 开头的 Key。"
+    if raw.startswith("sk-"):
+        return "误填了 OpenAI Key（sk-）。请填写 Gemini Key（以 **AIza** 开头）。"
+    if suite_secret("gemini", "api_key") and not sanitize_gemini_api_key(
+        st.session_state.get(SUITE_GEMINI_API_KEY, "")
+    ):
+        return (
+            "Secrets 中的 [gemini] api_key 格式无效（需以 AIza 开头）。"
+            "请检查 Streamlit Cloud → Settings → Secrets，或改在侧边栏直接填写。"
+        )
     return (
         "Gemini API Key 格式无效。"
-        "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制以 **AIza** 开头的 Key。"
+        "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key（通常以 **AIzaSy** 开头，约 39 位）。"
     )
 
 
@@ -3029,9 +3050,9 @@ def main(*, embedded: bool = False) -> None:
     generate_btn = st.button("🚀 生成 AI 分析报告", type="primary", use_container_width=False)
 
     if generate_btn:
-        clean_api_key = _sanitize_api_key(api_key)
+        clean_api_key = get_gemini_api_key()
         if not clean_api_key:
-            st.error(f"❌ {_gemini_key_error_hint(api_key)}")
+            st.error(f"❌ {_gemini_key_error_hint()}")
         else:
             try:
                 with st.spinner("正在提取多渠道数据..."):
@@ -3216,9 +3237,9 @@ def main(*, embedded: bool = False) -> None:
                 key="followup_chat_input",
             )
             if question:
-                followup_key = _sanitize_api_key(api_key)
+                followup_key = get_gemini_api_key()
                 if not followup_key:
-                    st.error(f"❌ {_gemini_key_error_hint(api_key)}")
+                    st.error(f"❌ {_gemini_key_error_hint()}")
                 else:
                     with st.spinner("AI 正在思考..."):
                         reply = answer_followup_question(

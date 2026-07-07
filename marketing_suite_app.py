@@ -43,6 +43,7 @@ from suite_shared import (
     SUITE_SMTP_USER,
     SUITE_TITLE,
     get_gemini_api_key,
+    sanitize_gemini_api_key,
     secret,
 )
 
@@ -114,9 +115,12 @@ def _render_shared_sidebar() -> None:
             help="两个工具共用；也可在 secrets.toml 的 [gemini] api_key 预填。",
         )
         if get_gemini_api_key():
-            st.caption("✅ 已填写 Gemini Key")
+            if sanitize_gemini_api_key(st.session_state.get(SUITE_GEMINI_API_KEY, "")):
+                st.caption("✅ Gemini Key 有效（来源：侧边栏）")
+            else:
+                st.caption("✅ Gemini Key 有效（来源：Secrets）")
         elif secret("gemini", "api_key"):
-            st.caption("✅ 使用 Secrets 中的 Gemini Key")
+            st.caption("⚠️ Secrets 中 gemini.api_key 格式无效，请检查是否为 AIza 开头的完整 Key")
 
         col_proxy, col_redetect = st.columns([3, 1])
         with col_proxy:
