@@ -16,26 +16,43 @@ SUITE_SMTP_USER = "suite_smtp_user"
 SUITE_SMTP_PASSWORD = "suite_smtp_password"
 SUITE_SMTP_FROM_NAME = "suite_smtp_from_name"
 
-GEMINI_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
+GEMINI_STANDARD_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
+GEMINI_AUTH_KEY_PATTERN = re.compile(r"AQ\.[A-Za-z0-9._-]{10,}")
 
 
 def sanitize_gemini_api_key(api_key: str) -> str:
-    """去除杂质并提取 AIza... 形态的 Gemini API Key。"""
+    """去除杂质并提取 Gemini API Key（支持 AIza 标准 Key 与 AQ. Auth Key）。"""
     raw = (api_key or "").strip().strip('"').strip("'").strip()
     if not raw:
         return ""
 
     raw = re.sub(r"[\u200b-\u200d\ufeff\u00a0]", "", raw)
 
-    match = GEMINI_KEY_PATTERN.search(raw)
-    if match:
-        return match.group(0)
+    for pattern in (GEMINI_AUTH_KEY_PATTERN, GEMINI_STANDARD_KEY_PATTERN):
+        match = pattern.search(raw)
+        if match:
+            return match.group(0)
 
     compact = re.sub(r"\s+", "", raw)
-    if GEMINI_KEY_PATTERN.fullmatch(compact):
-        return compact
+    for pattern in (GEMINI_AUTH_KEY_PATTERN, GEMINI_STANDARD_KEY_PATTERN):
+        if pattern.fullmatch(compact):
+            return compact
 
     return ""
+
+
+def build_gemini_http_headers(api_key: str) -> dict:
+    """
+    构建 Gemini HTTP 请求头。
+    AQ. Auth Key 在 OpenAI 兼容端点需用 x-goog-api-key，不能用 Bearer。
+    """
+    clean = sanitize_gemini_api_key(api_key) or (api_key or "").strip()
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if clean.upper().startswith("AQ."):
+        headers["x-goog-api-key"] = clean
+    else:
+        headers["Authorization"] = f"Bearer {clean}"
+    return headers
 
 
 def secret(section: str, key: str, default: str = "") -> str:

@@ -31,6 +31,7 @@ from suite_shared import (
     SUITE_GEMINI_API_KEY,
     SUITE_SMTP_PASSWORD,
     SUITE_SMTP_USER,
+    build_gemini_http_headers,
     get_gemini_api_key,
     sanitize_gemini_api_key,
     secret as suite_secret,
@@ -2017,13 +2018,13 @@ def _gemini_key_error_hint(raw_key: str = "") -> str:
 
     if not raw:
         return (
-            "请先在左侧侧边栏填写 Gemini API Key（以 AIza 开头），"
+            "请先在左侧侧边栏填写 Gemini API Key（AIza 或 AQ. 开头），"
             "或在 Streamlit Secrets 的 [gemini] api_key 中配置。"
         )
     if re.search(r"[\u4e00-\u9fff]", raw):
         return (
             "检测到 Key 中含中文，可能是误粘贴了说明文字。"
-            "请只保留以 **AIza** 开头的英文 Key。"
+            "请只保留完整的英文 Key（AIza... 或 AQ....）。"
         )
     lowered = raw.lower()
     if "xxxx" in lowered:
@@ -2032,19 +2033,20 @@ def _gemini_key_error_hint(raw_key: str = "") -> str:
             "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制真实 Key。"
         )
     if lowered.startswith("apify"):
-        return "误填了 Apify Token。请在「Google Gemini API Key」栏填写以 **AIza** 开头的 Key。"
+        return "误填了 Apify Token。请在「Google Gemini API Key」栏填写 AIza 或 AQ. 开头的 Key。"
     if raw.startswith("sk-"):
-        return "误填了 OpenAI Key（sk-）。请填写 Gemini Key（以 **AIza** 开头）。"
+        return "误填了 OpenAI Key（sk-）。请填写 Gemini Key（AIza 或 AQ. 开头）。"
     if suite_secret("gemini", "api_key") and not sanitize_gemini_api_key(
         st.session_state.get(SUITE_GEMINI_API_KEY, "")
     ):
         return (
-            "Secrets 中的 [gemini] api_key 格式无效（需以 AIza 开头）。"
+            "Secrets 中的 [gemini] api_key 格式无效（需 AIza 或 AQ. 开头）。"
             "请检查 Streamlit Cloud → Settings → Secrets，或改在侧边栏直接填写。"
         )
     return (
         "Gemini API Key 格式无效。"
-        "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key（通常以 **AIzaSy** 开头，约 39 位）。"
+        "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key"
+        "（新版以 **AQ.** 开头，旧版以 **AIzaSy** 开头）。"
     )
 
 
@@ -2203,10 +2205,7 @@ def generate_report(
     _validate_llm_credentials(api_key, base_url)
 
     url = f"{base_url}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json; charset=utf-8",
-    }
+    headers = build_gemini_http_headers(api_key)
     timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
     report_temperature = min(temperature, 0.4)
     sections_plan = report_sections or REPORT_SECTIONS
@@ -2409,10 +2408,7 @@ def answer_followup_question(
         messages.append({"role": "user", "content": question.strip()})
 
     url = f"{base_url}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json; charset=utf-8",
-    }
+    headers = build_gemini_http_headers(api_key)
     payload = {
         "model": model_name,
         "messages": messages,

@@ -120,7 +120,7 @@ def _render_shared_sidebar() -> None:
             else:
                 st.caption("✅ Gemini Key 有效（来源：Secrets）")
         elif secret("gemini", "api_key"):
-            st.caption("⚠️ Secrets 中 gemini.api_key 格式无效，请检查是否为 AIza 开头的完整 Key")
+            st.caption("⚠️ Secrets 中 gemini.api_key 格式无效，请检查是否为 AIza 或 AQ. 开头的完整 Key")
 
         col_proxy, col_redetect = st.columns([3, 1])
         with col_proxy:
