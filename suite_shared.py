@@ -16,7 +16,7 @@ SUITE_SMTP_PORT = "suite_smtp_port"
 SUITE_SMTP_USER = "suite_smtp_user"
 SUITE_SMTP_PASSWORD = "suite_smtp_password"
 SUITE_SMTP_FROM_NAME = "suite_smtp_from_name"
-GEMINI_KEY_VALIDATION_VERSION = "2026-07-07e"
+GEMINI_KEY_VALIDATION_VERSION = "2026-07-07f"
 SUITE_DEPLOY_VERSION = GEMINI_KEY_VALIDATION_VERSION
 
 GEMINI_STANDARD_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
@@ -199,7 +199,10 @@ def apply_ad_analysis_gemini_patches() -> None:
     except Exception:
         return
 
-    ad._sanitize_api_key = sanitize_gemini_api_key  # type: ignore[attr-defined]
+    try:
+        ad._sanitize_api_key = sanitize_gemini_api_key  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
     def _patched_gemini_key_error_hint(raw_key: str = "") -> str:
         sidebar_raw = str(st.session_state.get(SUITE_GEMINI_API_KEY, "")).strip()
@@ -239,4 +242,7 @@ def apply_ad_analysis_gemini_patches() -> None:
             "（新版以 **AQ.** 开头，旧版以 **AIzaSy** 开头）。"
         )
 
-    ad._gemini_key_error_hint = _patched_gemini_key_error_hint  # type: ignore[attr-defined]
+    try:
+        ad._gemini_key_error_hint = _patched_gemini_key_error_hint  # type: ignore[attr-defined]
+    except Exception:
+        pass

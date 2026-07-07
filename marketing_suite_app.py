@@ -227,8 +227,11 @@ def _render_shared_sidebar() -> None:
 
 
 def main() -> None:
-    sync_gemini_key_session_state()
-    apply_ad_analysis_gemini_patches()
+    try:
+        sync_gemini_key_session_state()
+        apply_ad_analysis_gemini_patches()
+    except Exception:
+        pass
     _render_shared_sidebar()
 
     st.title(f"{SUITE_TITLE} · {SUITE_DEPLOY_VERSION}")

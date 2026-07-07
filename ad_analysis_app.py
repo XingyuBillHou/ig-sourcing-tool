@@ -34,12 +34,14 @@ from suite_shared import (
     SUITE_SMTP_PASSWORD,
     SUITE_SMTP_USER,
     _gemini_key_raw_candidates,
+    apply_ad_analysis_gemini_patches,
     build_gemini_http_headers,
     describe_gemini_key_input,
     get_gemini_api_key,
     is_gemini_auth_key,
     sanitize_gemini_api_key,
     secret as suite_secret,
+    sync_gemini_key_session_state,
 )
 
 # 避免 macOS 默认 locale 下 HTTP 请求体中文被按 ASCII 编码
@@ -2006,7 +2008,25 @@ def _validate_llm_credentials(api_key: str, base_url: str) -> None:
 
 
 def _sanitize_api_key(api_key: str) -> str:
-    return sanitize_gemini_api_key(api_key)
+    clean = sanitize_gemini_api_key(api_key)
+    if clean:
+        return clean
+    compact = re.sub(r"\s+", "", (api_key or "").strip())
+    if re.match(r"(?i)^aq\.", compact) and len(compact) >= 10:
+        return f"AQ.{compact[3:]}" if not compact.upper().startswith("AQ.") else compact
+    return ""
+
+
+def _resolve_gemini_key_for_report() -> str:
+    """生成报告前解析 Key：侧边栏 / Secrets / AQ. 兜底。"""
+    clean = get_gemini_api_key()
+    if clean:
+        return clean
+    for raw in _gemini_key_raw_candidates():
+        fallback = _sanitize_api_key(raw)
+        if fallback:
+            return fallback
+    return ""
 
 
 def _raw_gemini_key_candidates() -> list[str]:
@@ -2883,6 +2903,12 @@ def apply_adaptive_theme(mode: str = "system") -> None:
 # ============================================================
 
 def main(*, embedded: bool = False) -> None:
+    try:
+        sync_gemini_key_session_state()
+        apply_ad_analysis_gemini_patches()
+    except Exception:
+        pass
+
     if not embedded:
         st.set_page_config(
             page_title="投放数据AI分析",
@@ -3177,9 +3203,9 @@ def main(*, embedded: bool = False) -> None:
     generate_btn = st.button("🚀 生成 AI 分析报告", type="primary", use_container_width=False)
 
     if generate_btn:
-        clean_api_key = get_gemini_api_key()
+        clean_api_key = _resolve_gemini_key_for_report()
         if not clean_api_key:
-            st.error(f"❌ {_gemini_key_error_hint()}")
+            st.error(f"❌ [{GEMINI_KEY_VALIDATION_VERSION}] {_gemini_key_error_hint()}")
         else:
             try:
                 with st.spinner("正在提取多渠道数据..."):
@@ -3364,9 +3390,9 @@ def main(*, embedded: bool = False) -> None:
                 key="followup_chat_input",
             )
             if question:
-                followup_key = get_gemini_api_key()
+                followup_key = _resolve_gemini_key_for_report()
                 if not followup_key:
-                    st.error(f"❌ {_gemini_key_error_hint()}")
+                    st.error(f"❌ [{GEMINI_KEY_VALIDATION_VERSION}] {_gemini_key_error_hint()}")
                 else:
                     with st.spinner("AI 正在思考..."):
                         reply = answer_followup_question(
