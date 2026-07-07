@@ -17,7 +17,19 @@ SUITE_SMTP_PASSWORD = "suite_smtp_password"
 SUITE_SMTP_FROM_NAME = "suite_smtp_from_name"
 
 GEMINI_STANDARD_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
-GEMINI_AUTH_KEY_PATTERN = re.compile(r"AQ\.[A-Za-z0-9._-]{10,}")
+GEMINI_AUTH_KEY_PATTERN = re.compile(r"AQ\.[A-Za-z0-9._+=/-]{8,}", re.I)
+GEMINI_AUTH_KEY_PREFIX = re.compile(r"(?i)^aq\.")
+
+
+def is_gemini_auth_key(api_key: str) -> bool:
+    clean = sanitize_gemini_api_key(api_key)
+    return bool(clean and GEMINI_AUTH_KEY_PREFIX.match(clean))
+
+
+def _normalize_gemini_auth_key(key: str) -> str:
+    if key.upper().startswith("AQ."):
+        return "AQ." + key[3:]
+    return key
 
 
 def sanitize_gemini_api_key(api_key: str) -> str:
@@ -27,28 +39,35 @@ def sanitize_gemini_api_key(api_key: str) -> str:
         return ""
 
     raw = re.sub(r"[\u200b-\u200d\ufeff\u00a0]", "", raw)
+    raw = raw.strip("[](){}<>`")
 
     for pattern in (GEMINI_AUTH_KEY_PATTERN, GEMINI_STANDARD_KEY_PATTERN):
         match = pattern.search(raw)
         if match:
-            return match.group(0)
+            return _normalize_gemini_auth_key(match.group(0))
 
     compact = re.sub(r"\s+", "", raw)
     for pattern in (GEMINI_AUTH_KEY_PATTERN, GEMINI_STANDARD_KEY_PATTERN):
         if pattern.fullmatch(compact):
-            return compact
+            return _normalize_gemini_auth_key(compact)
+
+    if GEMINI_AUTH_KEY_PREFIX.match(compact):
+        body = re.sub(r"[^A-Za-z0-9._+=/-]", "", compact[3:])
+        if len(body) >= 8:
+            return f"AQ.{body}"
 
     return ""
 
 
-def build_gemini_http_headers(api_key: str) -> dict:
+def build_gemini_http_headers(api_key: str, *, for_openai_compat: bool = False) -> dict:
     """
     构建 Gemini HTTP 请求头。
-    AQ. Auth Key 在 OpenAI 兼容端点需用 x-goog-api-key，不能用 Bearer。
+    原生 Gemini API 与 AQ. Auth Key 均使用 x-goog-api-key。
+    OpenAI 兼容端点仅适用于 AIza 标准 Key（Bearer）。
     """
     clean = sanitize_gemini_api_key(api_key) or (api_key or "").strip()
     headers = {"Content-Type": "application/json; charset=utf-8"}
-    if clean.upper().startswith("AQ."):
+    if is_gemini_auth_key(clean) or not for_openai_compat:
         headers["x-goog-api-key"] = clean
     else:
         headers["Authorization"] = f"Bearer {clean}"

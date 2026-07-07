@@ -33,6 +33,7 @@ from suite_shared import (
     SUITE_SMTP_USER,
     build_gemini_http_headers,
     get_gemini_api_key,
+    is_gemini_auth_key,
     sanitize_gemini_api_key,
     secret as suite_secret,
 )
@@ -2013,7 +2014,9 @@ def _raw_gemini_key_candidates() -> list[str]:
 
 def _gemini_key_error_hint(raw_key: str = "") -> str:
     """当 Key 无法解析时，生成可操作的中文提示。"""
-    raw_candidates = [raw_key] if (raw_key or "").strip() else _raw_gemini_key_candidates()
+    sidebar_raw = str(st.session_state.get(SUITE_GEMINI_API_KEY, "")).strip()
+    secret_raw = str(suite_secret("gemini", "api_key")).strip()
+    raw_candidates = [raw_key] if (raw_key or "").strip() else [sidebar_raw, secret_raw]
     raw = next((str(r).strip() for r in raw_candidates if str(r).strip()), "")
 
     if not raw:
@@ -2036,12 +2039,16 @@ def _gemini_key_error_hint(raw_key: str = "") -> str:
         return "误填了 Apify Token。请在「Google Gemini API Key」栏填写 AIza 或 AQ. 开头的 Key。"
     if raw.startswith("sk-"):
         return "误填了 OpenAI Key（sk-）。请填写 Gemini Key（AIza 或 AQ. 开头）。"
-    if suite_secret("gemini", "api_key") and not sanitize_gemini_api_key(
-        st.session_state.get(SUITE_GEMINI_API_KEY, "")
-    ):
+    if secret_raw and not sanitize_gemini_api_key(secret_raw):
         return (
             "Secrets 中的 [gemini] api_key 格式无效（需 AIza 或 AQ. 开头）。"
             "请检查 Streamlit Cloud → Settings → Secrets，或改在侧边栏直接填写。"
+        )
+    if sidebar_raw and not sanitize_gemini_api_key(sidebar_raw):
+        return (
+            "侧边栏 Gemini API Key 格式无效。"
+            "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key"
+            "（新版以 **AQ.** 开头，旧版以 **AIzaSy** 开头）。"
         )
     return (
         "Gemini API Key 格式无效。"
@@ -2108,6 +2115,134 @@ def _request_chat_completion(
                 continue
             raise
     raise RuntimeError("API 多次重试后仍失败")
+
+
+def _messages_to_gemini_native(messages: list) -> tuple[str, list]:
+    """OpenAI messages → Gemini native systemInstruction + contents。"""
+    system_parts: list[str] = []
+    contents: list[dict] = []
+    for msg in messages:
+        role = msg.get("role")
+        text = str(msg.get("content", "") or "")
+        if role == "system":
+            if text:
+                system_parts.append(text)
+        elif role == "assistant":
+            contents.append({"role": "model", "parts": [{"text": text}]})
+        else:
+            contents.append({"role": "user", "parts": [{"text": text}]})
+    return "\n\n".join(system_parts), contents
+
+
+def _gemini_native_response_to_openai_shape(data: dict) -> dict:
+    """将 generateContent 响应转为与 chat/completions 兼容的结构。"""
+    if "error" in data:
+        err = data["error"]
+        message = err.get("message", str(err))
+        code = err.get("code", 400)
+        raise httpx.HTTPStatusError(
+            message,
+            request=httpx.Request("POST", GEMINI_NATIVE_BASE),
+            response=httpx.Response(code, text=json.dumps(data, ensure_ascii=False)),
+        )
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini 未返回 candidates，请稍后重试。")
+
+    candidate = candidates[0]
+    parts = candidate.get("content", {}).get("parts") or []
+    text = "".join(str(part.get("text", "")) for part in parts)
+    finish_reason = str(candidate.get("finishReason", "") or "").lower()
+    return {
+        "choices": [{
+            "message": {"content": text},
+            "finish_reason": "length" if finish_reason == "max_tokens" else finish_reason,
+        }],
+    }
+
+
+def _request_gemini_generate_content(
+    client,
+    api_key: str,
+    model_name: str,
+    messages: list,
+    temperature: float,
+    max_output_tokens: int,
+    retry_delays: tuple,
+) -> dict:
+    """调用 Gemini 原生 generateContent（兼容 AQ. Auth Key）。"""
+    clean_key = _sanitize_api_key(api_key)
+    system_prompt, contents = _messages_to_gemini_native(messages)
+    if not contents:
+        contents = [{"role": "user", "parts": [{"text": "请根据上述数据生成分析报告。"}]}]
+
+    url = f"{GEMINI_NATIVE_BASE}/models/{model_name}:generateContent"
+    headers = build_gemini_http_headers(clean_key)
+    payload: dict = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_output_tokens,
+        },
+    }
+    if system_prompt:
+        payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            resp = client.post(url, content=body, headers=headers)
+            if resp.status_code in (429, 502, 503, 529) and attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
+            if resp.status_code >= 400:
+                detail = resp.text[:500]
+                raise httpx.HTTPStatusError(
+                    detail,
+                    request=resp.request,
+                    response=resp,
+                )
+            return _gemini_native_response_to_openai_shape(resp.json())
+        except httpx.TimeoutException:
+            if attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
+            raise
+    raise RuntimeError("API 多次重试后仍失败")
+
+
+def _request_llm_completion(
+    client,
+    api_key: str,
+    base_url: str,
+    model_name: str,
+    messages: list,
+    temperature: float,
+    max_output_tokens: int,
+    retry_delays: tuple,
+) -> dict:
+    """AQ. Auth Key 走原生 Gemini；AIza 标准 Key 可继续走 OpenAI 兼容端点。"""
+    if is_gemini_auth_key(api_key):
+        return _request_gemini_generate_content(
+            client,
+            api_key,
+            model_name,
+            messages,
+            temperature,
+            max_output_tokens,
+            retry_delays,
+        )
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = build_gemini_http_headers(api_key, for_openai_compat=True)
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_output_tokens,
+    }
+    return _request_chat_completion(client, url, headers, payload, retry_delays)
 
 
 REPORT_SECTIONS = [
@@ -2204,8 +2339,6 @@ def generate_report(
     model_name = _require_ascii(model_name, "模型名称")
     _validate_llm_credentials(api_key, base_url)
 
-    url = f"{base_url}/chat/completions"
-    headers = build_gemini_http_headers(api_key)
     timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
     report_temperature = min(temperature, 0.4)
     sections_plan = report_sections or REPORT_SECTIONS
@@ -2244,14 +2377,15 @@ def generate_report(
 
                 content = ""
                 for attempt in range(2):
-                    payload = {
-                        "model": model_name,
-                        "messages": messages,
-                        "temperature": report_temperature,
-                        "max_tokens": max_output_tokens,
-                    }
-                    data = _request_chat_completion(
-                        client, url, headers, payload, retry_delays
+                    data = _request_llm_completion(
+                        client,
+                        api_key,
+                        base_url,
+                        model_name,
+                        messages,
+                        report_temperature,
+                        max_output_tokens,
+                        retry_delays,
                     )
                     choice = data.get("choices", [{}])[0]
                     content = choice.get("message", {}).get("content") or ""
@@ -2407,20 +2541,19 @@ def answer_followup_question(
                 messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": question.strip()})
 
-    url = f"{base_url}/chat/completions"
-    headers = build_gemini_http_headers(api_key)
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "temperature": min(temperature, 0.6),
-        "max_tokens": 2048,
-    }
     timeout = httpx.Timeout(180.0, connect=60.0)
 
     try:
         with httpx.Client(timeout=timeout) as client:
-            data = _request_chat_completion(
-                client, url, headers, payload, retry_delays=(5, 15)
+            data = _request_llm_completion(
+                client,
+                api_key,
+                base_url,
+                model_name,
+                messages,
+                min(temperature, 0.6),
+                2048,
+                (5, 15),
             )
         content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
         return content.strip() or "（模型未返回内容，请重试。）"
@@ -2468,6 +2601,7 @@ def _secret(*keys, default=""):
 # ============================================================
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+GEMINI_NATIVE_BASE = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
