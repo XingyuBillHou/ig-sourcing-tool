@@ -14,11 +14,6 @@ for path in (_ROOT, _FB_DIR):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
-from suite_shared import apply_ad_analysis_gemini_patches, sync_gemini_key_session_state
-
-sync_gemini_key_session_state()
-apply_ad_analysis_gemini_patches()
-
 from marketing_suite_app import main
 
 main()
