@@ -1222,7 +1222,9 @@ def build_system_prompt(report_type: str, date_mode: str) -> str:
 {time_note}
 
 # 数据说明
-- 数据来源可能包括：Shopify（电商大盘销售数据）、Google（Google Ads 投放数据）、Axon(AppLovin)（AppLovin 投放数据），以及多个 Meta 广告账号（如 WearNuage、Nuage Bra 等）。
+- **渠道/账号** 仅指 Excel 的 **Sheet 名称**（如 Shopify、Google、WearNuage、Nuage Bra、Axon 等），每个 Sheet 对应一个渠道或广告账户。
+- 同一 Meta 账号 Sheet 内，列名如 `ROI_CBO`、`ROI_Retargeting_4`、`Spent_CBO` 等是**该账号下的投放类型/广告系列指标列**，不是独立渠道，也**不是** Meta 后台的广告组名称。
+- 分析账号内部分项时，请用「WearNuage 账号下的 CBO 广告 ROI=1.18」这类表述；**禁止**把 `ROI_CBO` 等列名当作渠道名或账号名。
 - 每个渠道的数据是一份「记录列表」，每条记录对应一天（或一行）的原始字段，字段名以实际数据为准（可能包含消耗/Spend/Cost、曝光、点击、转化、ROAS、CPA、销售额/Revenue/Sales、订单数等）。
 - 若某渠道在该区间无数据，会用文字注明"该渠道此区间无数据"，请正常处理，不要编造数据，也不要因此中断对其他渠道的分析。
 
@@ -1272,7 +1274,10 @@ def build_data_digest(extracted_data: dict) -> str:
                         continue
                 except (TypeError, ValueError):
                     pass
-                parts.append(f"{k}={v}")
+                display_key = _humanize_metric_field(k)
+                if display_key != k:
+                    display_key = f"{display_key} (`{k}`)"
+                parts.append(f"{display_key}={v}")
             if parts:
                 lines.append(f"- **{sheet_name}** ({label}): " + "; ".join(parts))
     return "\n".join(lines) + "\n"
@@ -1308,6 +1313,93 @@ def _fmt_metric(val) -> str:
         return f"{int(f):,}"
     return f"{f:,.2f}"
 
+
+def _humanize_campaign_suffix(suffix: str) -> str:
+    """将 ROI_CBO / ROI_Retargeting_4 等列名后缀转为可读中文。"""
+    s = re.sub(r"\s+", " ", str(suffix or "").replace("_", " ")).strip()
+    if not s:
+        return "未知分项"
+    upper = s.upper()
+    if upper == "CBO":
+        return "CBO 广告"
+    if upper in ("总", "TOTAL"):
+        return "汇总"
+    m = re.match(r"(?i)retargeting\s*(\d+)", s)
+    if m:
+        return f"Retargeting {m.group(1)} 系列"
+    m = re.match(r"(?i)prospecting\s*(\d+)?", s)
+    if m:
+        num = m.group(1)
+        return f"Prospecting {num} 系列" if num else "Prospecting 系列"
+    return s
+
+
+def _humanize_metric_field(key: str) -> str:
+    """指标列名 → 可读标签（保留原列名供对照）。"""
+    raw = str(key).strip()
+    kl = raw.lower().replace(" ", "")
+    if kl.startswith("roi_"):
+        label = _humanize_campaign_suffix(raw[4:])
+        return f"{label} ROI"
+    if kl.startswith("spent_") or kl.startswith("adspent_"):
+        label = _humanize_campaign_suffix(re.sub(r"(?i)^ad?\s*spent_", "", raw))
+        return f"{label} 消耗"
+    if kl.startswith("roas_"):
+        label = _humanize_campaign_suffix(raw[5:])
+        return f"{label} ROAS"
+    return raw
+
+
+def _is_account_submetric_column(key: str) -> bool:
+    """同一 Meta 账号 Sheet 内的分项指标列（非独立渠道）。"""
+    kl = str(key).lower().replace(" ", "")
+    prefixes = ("roi_", "roas_", "spent_", "adspent_", "cpm_", "cpc_", "ctr_")
+    if any(kl.startswith(p) for p in prefixes):
+        suffix = re.sub(r"(?i)^(roi|roas|spent|adspent|cpm|cpc|ctr)_", "", kl)
+        if suffix and suffix not in ("总", "total", "overall"):
+            return True
+    return False
+
+
+def _account_submetrics_markdown(sheet_name: str, row: dict) -> list[str]:
+    """生成账号内分项指标表（避免 AI 把 ROI_CBO 误当成渠道名）。"""
+    lines = [
+        "",
+        f"**{sheet_name} 账号内分项（以下为指标列，不是独立渠道/账号）**",
+        "",
+        "| 投放类型 | 指标 | 数值 | 原 Excel 列名 |",
+        "|---------|------|------|--------------|",
+    ]
+    rows_added = 0
+    for key, val in row.items():
+        if key == "日期" or not _is_account_submetric_column(key):
+            continue
+        if val in (None, "", "nan", "/"):
+            continue
+        try:
+            if isinstance(val, float) and np.isnan(val):
+                continue
+        except (TypeError, ValueError):
+            pass
+        label = _humanize_metric_field(key)
+        campaign = label
+        metric_type = "指标"
+        if " ROI" in label:
+            campaign = label.replace(" ROI", "")
+            metric_type = "ROI"
+        elif " ROAS" in label:
+            campaign = label.replace(" ROAS", "")
+            metric_type = "ROAS"
+        elif " 消耗" in label:
+            campaign = label.replace(" 消耗", "")
+            metric_type = "消耗"
+        lines.append(
+            f"| {campaign} | {metric_type} | {_fmt_metric(val) if _is_numeric(val) else val} | `{key}` |"
+        )
+        rows_added += 1
+    if rows_added == 0:
+        return []
+    return lines + [""]
 
 def _find_first_numeric(row: dict, keywords: list, prefer: str = None):
     prefer_match = None
@@ -1433,6 +1525,10 @@ def build_channel_tables_markdown(extracted_data: dict) -> str:
 
         lines.append(f"#### {sheet_name}")
         lines.append("")
+        row = _pick_summary_row(data)
+        sub_lines = _account_submetrics_markdown(sheet_name, row)
+        if sub_lines:
+            lines.extend(sub_lines)
         lines.append("| 指标字段 | 数值 |")
         lines.append("|---------|------|")
         for row_idx, row in enumerate(data):
@@ -1450,7 +1546,10 @@ def build_channel_tables_markdown(extracted_data: dict) -> str:
                 except (TypeError, ValueError):
                     pass
                 display_val = "无数据" if val == "/" else val
-                lines.append(f"| {prefix}{key} | {display_val} |")
+                display_key = _humanize_metric_field(key)
+                if display_key != key:
+                    display_key = f"{display_key} (`{key}`)"
+                lines.append(f"| {prefix}{display_key} | {display_val} |")
         lines.append("")
 
     return "\n".join(lines)
@@ -2293,9 +2392,12 @@ REPORT_SECTIONS = [
         "instruction": (
             "渠道数据表格已由系统自动生成（见下方），你**不要重复输出表格**。\n"
             "请**只写**「### 3.3 渠道洞察与诊断」小节，包含：\n"
-            "- 3~5 条 bullet：**增长引擎**（渠道名 + 具体 ROAS/消耗数字 + 原因）\n"
-            "- 3~5 条 bullet：**拖后腿渠道**（渠道名 + 具体问题数字 + 风险）\n"
+            "- 3~5 条 bullet：**增长引擎**（Sheet 渠道名 + 具体 ROAS/消耗数字 + 原因）\n"
+            "- 3~5 条 bullet：**拖后腿渠道**（Sheet 渠道名 + 具体问题数字 + 风险）\n"
             "- 2~3 条 cross-channel 对比结论（如 Meta vs Google vs AppLovin）\n"
+            "**渠道层级规则**：仅 Excel **Sheet 名**（如 WearNuage、Google）算渠道/账号。"
+            "`ROI_CBO`、`ROI_Retargeting_*` 等是 WearNuage **Sheet 内的投放类型指标列**，"
+            "引用时写「WearNuage 的 CBO 广告 ROI=…」，**禁止**把列名当作独立渠道名。\n"
             "**禁止**写第一、二、四章；**禁止**重新输出 Markdown 表格。"
         ),
         "min_chars": 200,
