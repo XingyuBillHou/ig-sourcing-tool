@@ -44,11 +44,13 @@ from suite_shared import (
     SUITE_SMTP_PORT,
     SUITE_SMTP_USER,
     SUITE_TITLE,
+    apply_ad_analysis_gemini_patches,
     describe_gemini_key_input,
     get_gemini_api_key,
     is_gemini_auth_key,
     sanitize_gemini_api_key,
     secret,
+    sync_gemini_key_session_state,
 )
 
 PAGE_ICON = ROOT / "page_icon.png"
@@ -225,6 +227,8 @@ def _render_shared_sidebar() -> None:
 
 
 def main() -> None:
+    sync_gemini_key_session_state()
+    apply_ad_analysis_gemini_patches()
     _render_shared_sidebar()
 
     st.title(f"{SUITE_TITLE} · {SUITE_DEPLOY_VERSION}")

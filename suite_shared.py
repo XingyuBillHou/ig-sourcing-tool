@@ -16,7 +16,7 @@ SUITE_SMTP_PORT = "suite_smtp_port"
 SUITE_SMTP_USER = "suite_smtp_user"
 SUITE_SMTP_PASSWORD = "suite_smtp_password"
 SUITE_SMTP_FROM_NAME = "suite_smtp_from_name"
-GEMINI_KEY_VALIDATION_VERSION = "2026-07-07c"
+GEMINI_KEY_VALIDATION_VERSION = "2026-07-07d"
 SUITE_DEPLOY_VERSION = GEMINI_KEY_VALIDATION_VERSION
 
 GEMINI_STANDARD_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
@@ -180,3 +180,63 @@ def describe_gemini_key_input(raw: str) -> str:
     if len(compact) > 6:
         prefix += "…"
     return f"长度 {len(compact)}，前缀 `{prefix}`"
+
+
+def sync_gemini_key_session_state() -> None:
+    """将侧边栏 / Secrets 中的 Key 清洗后写回 session，兼容旧版 ad_analysis。"""
+    clean = get_gemini_api_key()
+    if clean:
+        st.session_state[SUITE_GEMINI_API_KEY] = clean
+
+
+def apply_ad_analysis_gemini_patches() -> None:
+    """
+    兼容旧版 ad_analysis_app（仅识别 AIza）的运行时补丁。
+    Cloud 若卡在 f2dea07 等旧提交，Reboot 后由新版入口注入 AQ. 支持。
+    """
+    try:
+        import ad_analysis_app as ad
+    except Exception:
+        return
+
+    ad._sanitize_api_key = sanitize_gemini_api_key  # type: ignore[attr-defined]
+
+    def _patched_gemini_key_error_hint(raw_key: str = "") -> str:
+        sidebar_raw = str(st.session_state.get(SUITE_GEMINI_API_KEY, "")).strip()
+        secret_raw = str(
+            secret("gemini", "api_key") or secret("google", "api_key")
+        ).strip()
+        raw_candidates = [raw_key] if (raw_key or "").strip() else [sidebar_raw, secret_raw]
+        raw = next((str(r).strip() for r in raw_candidates if str(r).strip()), "")
+
+        if not raw:
+            return (
+                "请先在左侧侧边栏填写 Gemini API Key（AIza 或 AQ. 开头），"
+                "或在 Streamlit Secrets 的 [gemini] api_key 中配置。"
+            )
+        if re.search(r"[\u4e00-\u9fff]", raw):
+            return (
+                "检测到 Key 中含中文，可能是误粘贴了说明文字。"
+                "请只保留完整的英文 Key（AIza... 或 AQ....）。"
+            )
+        lowered = raw.lower()
+        if "xxxx" in lowered:
+            return (
+                "检测到占位符或示例 Key（含 xxxx）。"
+                "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制真实 Key。"
+            )
+        if lowered.startswith("apify"):
+            return "误填了 Apify Token。请在「Google Gemini API Key」栏填写 AIza 或 AQ. 开头的 Key。"
+        if raw.startswith("sk-"):
+            return "误填了 OpenAI Key（sk-）。请填写 Gemini Key（AIza 或 AQ. 开头）。"
+        return (
+            "Gemini API Key 格式无效。"
+            f"侧栏：{describe_gemini_key_input(sidebar_raw)}；"
+            f"Secrets：{describe_gemini_key_input(secret_raw)}。"
+            f"（部署版本应为 {GEMINI_KEY_VALIDATION_VERSION}；"
+            "若仍看到「以 AIza 开头」说明 Cloud 未更新，请到 Manage app → Reboot。）"
+            "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key"
+            "（新版以 **AQ.** 开头，旧版以 **AIzaSy** 开头）。"
+        )
+
+    ad._gemini_key_error_hint = _patched_gemini_key_error_hint  # type: ignore[attr-defined]
