@@ -29,9 +29,11 @@ import streamlit as st
 
 from suite_shared import (
     GEMINI_KEY_VALIDATION_VERSION,
+    SUITE_DEPLOY_VERSION,
     SUITE_GEMINI_API_KEY,
     SUITE_SMTP_PASSWORD,
     SUITE_SMTP_USER,
+    _gemini_key_raw_candidates,
     build_gemini_http_headers,
     describe_gemini_key_input,
     get_gemini_api_key,
@@ -2008,16 +2010,15 @@ def _sanitize_api_key(api_key: str) -> str:
 
 
 def _raw_gemini_key_candidates() -> list[str]:
-    return [
-        st.session_state.get(SUITE_GEMINI_API_KEY, ""),
-        suite_secret("gemini", "api_key"),
-    ]
+    return _gemini_key_raw_candidates()
 
 
 def _gemini_key_error_hint(raw_key: str = "") -> str:
     """当 Key 无法解析时，生成可操作的中文提示。"""
     sidebar_raw = str(st.session_state.get(SUITE_GEMINI_API_KEY, "")).strip()
-    secret_raw = str(suite_secret("gemini", "api_key")).strip()
+    secret_raw = str(
+        suite_secret("gemini", "api_key") or suite_secret("google", "api_key")
+    ).strip()
     raw_candidates = [raw_key] if (raw_key or "").strip() else [sidebar_raw, secret_raw]
     raw = next((str(r).strip() for r in raw_candidates if str(r).strip()), "")
 
@@ -2057,6 +2058,8 @@ def _gemini_key_error_hint(raw_key: str = "") -> str:
         "Gemini API Key 格式无效。"
         f"侧栏：{describe_gemini_key_input(sidebar_raw)}；"
         f"Secrets：{describe_gemini_key_input(secret_raw)}。"
+        f"（当前部署版本应为 {GEMINI_KEY_VALIDATION_VERSION}；若你仍看到「以 AIza 开头」旧提示，"
+        "说明 Cloud 未更新，请到 Streamlit → Manage app → Reboot。）"
         "请从 [Google AI Studio](https://aistudio.google.com/apikey) 复制完整 Key"
         "（新版以 **AQ.** 开头，旧版以 **AIzaSy** 开头）。"
     )

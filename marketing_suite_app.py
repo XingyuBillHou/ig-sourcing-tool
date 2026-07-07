@@ -36,6 +36,7 @@ from fb_competitor_ad_core import (  # noqa: E402
 )
 from suite_shared import (
     GEMINI_KEY_VALIDATION_VERSION,
+    SUITE_DEPLOY_VERSION,
     SUITE_GEMINI_API_KEY,
     SUITE_SMTP_FROM_NAME,
     SUITE_SMTP_HOST,
@@ -124,13 +125,20 @@ def _render_shared_sidebar() -> None:
                 st.caption(f"✅ Gemini Key 有效（来源：侧边栏，{key_type}）")
             else:
                 st.caption(f"✅ Gemini Key 有效（来源：Secrets，{key_type}）")
-        elif secret("gemini", "api_key"):
-            st.caption(
-                "⚠️ Secrets 中 gemini.api_key 格式无效："
-                f"{describe_gemini_key_input(secret('gemini', 'api_key'))}"
-            )
+        else:
+            sidebar_raw = st.session_state.get(SUITE_GEMINI_API_KEY, "")
+            if (sidebar_raw or "").strip():
+                st.caption(
+                    "⚠️ 侧边栏 Key 未能识别："
+                    f"{describe_gemini_key_input(sidebar_raw)}"
+                )
+            elif secret("gemini", "api_key") or secret("google", "api_key"):
+                st.caption(
+                    "⚠️ Secrets 中 gemini.api_key 格式无效："
+                    f"{describe_gemini_key_input(secret('gemini', 'api_key') or secret('google', 'api_key'))}"
+                )
 
-        st.caption(f"Key 校验版本：{GEMINI_KEY_VALIDATION_VERSION}")
+        st.caption(f"部署版本：{GEMINI_KEY_VALIDATION_VERSION}（若未显示此版本请 Reboot App）")
 
         col_proxy, col_redetect = st.columns([3, 1])
         with col_proxy:
@@ -219,7 +227,7 @@ def _render_shared_sidebar() -> None:
 def main() -> None:
     _render_shared_sidebar()
 
-    st.title(SUITE_TITLE)
+    st.title(f"{SUITE_TITLE} · {SUITE_DEPLOY_VERSION}")
     st.caption("FB 广告库浅捞 · 投放数据 AI 分析（Gemini / Apify 密钥共用）")
 
     tab_fb, tab_analysis = st.tabs(["🎬 FB 广告库浅捞", "📊 投放数据 AI 分析"])

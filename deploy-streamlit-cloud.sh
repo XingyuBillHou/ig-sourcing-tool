@@ -5,7 +5,7 @@ set -euo pipefail
 REPO="${STREAMLIT_REPO:-XingyuBillHou/ig-sourcing-tool}"
 BRANCH="${STREAMLIT_BRANCH:-main}"
 MAIN_FILE="${STREAMLIT_MAIN_FILE:-marketing_suite_app.py}"
-SUBDOMAIN="${STREAMLIT_SUBDOMAIN:-fb-ad-tool}"
+SUBDOMAIN="${STREAMLIT_SUBDOMAIN:-bill-using}"
 
 DEPLOY_URL="https://share.streamlit.io/deploy?repository=${REPO}&branch=${BRANCH}&mainModule=${MAIN_FILE}&subdomain=${SUBDOMAIN}"
 

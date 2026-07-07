@@ -16,7 +16,8 @@ SUITE_SMTP_PORT = "suite_smtp_port"
 SUITE_SMTP_USER = "suite_smtp_user"
 SUITE_SMTP_PASSWORD = "suite_smtp_password"
 SUITE_SMTP_FROM_NAME = "suite_smtp_from_name"
-GEMINI_KEY_VALIDATION_VERSION = "2026-07-07b"
+GEMINI_KEY_VALIDATION_VERSION = "2026-07-07c"
+SUITE_DEPLOY_VERSION = GEMINI_KEY_VALIDATION_VERSION
 
 GEMINI_STANDARD_KEY_PATTERN = re.compile(r"AIza[0-9A-Za-z_-]{20,}", re.I)
 GEMINI_AUTH_KEY_PATTERN = re.compile(r"AQ\.[!-~]{8,}", re.I)
@@ -127,21 +128,46 @@ def secret(section: str, key: str, default: str = "") -> str:
         val = st.secrets[section][key]
         return str(val).strip() if val else default
     except Exception:
-        return default
+        pass
+
+    if (section, key) == ("gemini", "api_key"):
+        for flat_key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "gemini_api_key"):
+            try:
+                val = st.secrets[flat_key]
+                if val:
+                    return str(val).strip()
+            except Exception:
+                continue
+
+    return default
+
+
+def _gemini_key_raw_candidates() -> list[str]:
+    return [
+        st.session_state.get(SUITE_GEMINI_API_KEY, ""),
+        secret("gemini", "api_key"),
+        secret("google", "api_key"),
+    ]
 
 
 def get_gemini_api_key() -> str:
     """侧边栏优先；无效或留空时回退 Secrets / 环境变量，并统一清洗。"""
-    candidates = [
-        st.session_state.get(SUITE_GEMINI_API_KEY, ""),
-        secret("gemini", "api_key"),
-    ]
     best = ""
-    for raw in candidates:
+    for raw in _gemini_key_raw_candidates():
         clean = sanitize_gemini_api_key(raw)
         if clean and len(clean) > len(best):
             best = clean
-    return best
+
+    if best:
+        return best
+
+    for raw in _gemini_key_raw_candidates():
+        text = _normalize_key_input(raw)
+        compact = re.sub(r"\s+", "", text)
+        if re.match(r"(?i)^aq\.", compact) and len(compact) >= 10:
+            return _normalize_gemini_auth_key(compact)
+
+    return ""
 
 
 def describe_gemini_key_input(raw: str) -> str:
