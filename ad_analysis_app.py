@@ -725,48 +725,173 @@ def _filter_week_rows(cleaned_df: pd.DataFrame, date_col, bucket: dict) -> pd.Da
 # 模块一(数据层)：复杂合并表头的"暴力拍平"读取引擎
 # ============================================================
 
+DATE_HEADER_LABELS = frozenset({"日期", "date", "Date", "DATE"})
+GENERIC_COLUMN_RE = re.compile(r"^列\d+$")
+
+
+def _is_date_header_cell(val) -> bool:
+    try:
+        if val is None or pd.isna(val):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return str(val).strip() in DATE_HEADER_LABELS
+
+
+def find_date_header_rows(raw: pd.DataFrame) -> list:
+    """定位 Sheet 中所有以「日期」开头的新表头块（支持中途换表头）。"""
+    return [
+        i for i in range(len(raw))
+        if _is_date_header_cell(raw.iloc[i, 0])
+    ]
+
+
+def _dedupe_column_names(names: list) -> list:
+    seen = {}
+    final = []
+    for name in names:
+        if name in seen:
+            seen[name] += 1
+            final.append(f"{name}_{seen[name]}")
+        else:
+            seen[name] = 0
+            final.append(name)
+    return final
+
+
+def _header_row_non_empty_count(row) -> int:
+    count = 0
+    for val in row:
+        try:
+            if val is None or pd.isna(val):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if str(val).strip() and str(val).strip().lower() != "nan":
+            count += 1
+    return count
+
+
+def _build_column_names(header_block: pd.DataFrame) -> list:
+    """
+    拍平多层表头为列名。
+    - 仅对「分组行」（非最后一行表头）做横向 ffill，还原 Excel 合并单元格；
+    - 最后一行表头视为 campaign/指标名行，不做横向 ffill，避免 Retargeting 误填到空列。
+    """
+    if header_block.empty:
+        return []
+
+    n_rows = len(header_block)
+    processed = []
+    for row_idx in range(n_rows):
+        row = header_block.iloc[row_idx].copy()
+        if row_idx != n_rows - 1:
+            row = row.ffill()
+        processed.append(row)
+
+    names = []
+    for col_idx in range(header_block.shape[1]):
+        parts = []
+        for row in processed:
+            val = row.iloc[col_idx]
+            try:
+                if val is None or pd.isna(val):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            s = str(val).strip()
+            if s and s.lower() != "nan" and s not in parts:
+                parts.append(s)
+        names.append("_".join(parts) if parts else f"列{col_idx}")
+    return names
+
+
+def _find_segment_data_start(raw: pd.DataFrame, header_start: int, segment_end: int) -> int:
+    for i in range(header_start + 1, segment_end):
+        if is_data_row(raw.iloc[i]):
+            return i
+    return min(header_start + 1, segment_end)
+
+
+def _resolve_header_block_start(raw: pd.DataFrame, header_start: int) -> int:
+    """从「日期」行向上纳入同一表头块中的指标/分组行（如 CPM、ROAS）。"""
+    actual_start = header_start
+    for i in range(header_start - 1, -1, -1):
+        if is_header_row(raw.iloc[i]):
+            actual_start = i
+        else:
+            break
+    return actual_start
+
+
+def _segment_quality_score(columns) -> int:
+    score = 0
+    for col in columns:
+        name = str(col)
+        if GENERIC_COLUMN_RE.match(name):
+            continue
+        score += 3 if name != "日期" else 1
+    return score
+
+
+def _is_valid_segment(df: pd.DataFrame) -> bool:
+    if df is None or df.empty or len(df.columns) < 2:
+        return False
+    generic = sum(1 for c in df.columns if GENERIC_COLUMN_RE.match(str(c)))
+    if generic >= max(3, len(df.columns) // 2):
+        return False
+    return _segment_quality_score(df.columns) >= 4
+
+
+def _flatten_header_segment(raw: pd.DataFrame, header_start: int, segment_end: int) -> pd.DataFrame:
+    data_start = _find_segment_data_start(raw, header_start, segment_end)
+    if data_start <= header_start:
+        return pd.DataFrame()
+
+    header_start = _resolve_header_block_start(raw, header_start)
+    header_block = raw.iloc[header_start:data_start]
+    if header_block.empty:
+        return pd.DataFrame()
+
+    while len(header_block) > 1 and _header_row_non_empty_count(header_block.iloc[-1]) == 0:
+        header_block = header_block.iloc[:-1]
+
+    data_block = raw.iloc[data_start:segment_end].copy()
+    if data_block.empty:
+        return pd.DataFrame()
+
+    data_block.columns = _dedupe_column_names(_build_column_names(header_block))
+    return data_block.reset_index(drop=True)
+
+
 def flatten_merged_header(raw: pd.DataFrame) -> pd.DataFrame:
     """
     将已读出的原始表格（header=None）拍平 2-4 行合并表头，返回标准 DataFrame。
-    适配 Shopify 等多层表头、M.DD 短日期等格式。
+    适配 Shopify 等多层表头、中途换表头、M.DD 短日期等格式。
     """
     if raw.empty or raw.shape[0] < 1:
         return pd.DataFrame()
 
-    data_start_row = find_data_start_row(raw)
-    if data_start_row == 0:
-        data_start_row = 1
+    header_starts = find_date_header_rows(raw)
+    if not header_starts:
+        data_start_row = find_data_start_row(raw)
+        if data_start_row == 0:
+            data_start_row = 1
+        header_start = find_header_start(raw, data_start_row)
+        return _flatten_header_segment(raw, header_start, len(raw))
 
-    header_start = find_header_start(raw, data_start_row)
-    header_block = raw.iloc[header_start:data_start_row]
-    header_block = header_block.ffill(axis=1).ffill(axis=0)
+    segments = []
+    for idx, header_start in enumerate(header_starts):
+        segment_end = header_starts[idx + 1] if idx + 1 < len(header_starts) else len(raw)
+        segment_df = _flatten_header_segment(raw, header_start, segment_end)
+        if _is_valid_segment(segment_df):
+            segments.append(segment_df)
 
-    data_block = raw.iloc[data_start_row:].reset_index(drop=True)
-
-    new_columns = []
-    for col_idx in range(raw.shape[1]):
-        parts = []
-        for row_idx in range(len(header_block)):
-            val = header_block.iloc[row_idx, col_idx]
-            if pd.notna(val):
-                s = str(val).strip()
-                if s and s.lower() != "nan" and s not in parts:
-                    parts.append(s)
-        col_name = "_".join(parts) if parts else f"列{col_idx}"
-        new_columns.append(col_name)
-
-    seen = {}
-    final_columns = []
-    for c in new_columns:
-        if c in seen:
-            seen[c] += 1
-            final_columns.append(f"{c}_{seen[c]}")
-        else:
-            seen[c] = 0
-            final_columns.append(c)
-
-    data_block.columns = final_columns
-    return data_block
+    if not segments:
+        return pd.DataFrame()
+    if len(segments) == 1:
+        return segments[0]
+    return pd.concat(segments, ignore_index=True, sort=False)
 
 
 def smart_read_sheet(xls: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
@@ -1223,8 +1348,8 @@ def build_system_prompt(report_type: str, date_mode: str) -> str:
 
 # 数据说明
 - **渠道/账号** 仅指 Excel 的 **Sheet 名称**（如 Shopify、Google、WearNuage、Nuage Bra、Axon 等），每个 Sheet 对应一个渠道或广告账户。
-- 同一 Meta 账号 Sheet 内，列名如 `ROI_CBO`、`ROI_Retargeting_4`、`Spent_CBO` 等是**该账号下的投放类型/广告系列指标列**，不是独立渠道，也**不是** Meta 后台的广告组名称。
-- 分析账号内部分项时，请用「WearNuage 账号下的 CBO 广告 ROI=1.18」这类表述；**禁止**把 `ROI_CBO` 等列名当作渠道名或账号名。
+- 同一 Meta 账号 Sheet 内，各列对应**具体广告系列**（如 `CBO一号内裤蛊池`、`CBO二号内裤蛊池` 等，名称来自 Excel 表头最后一行），列名可能形如 `Retargeting_CBO一号内裤蛊池_ROI` 或 `CBO一号内裤蛊池_Spent`。
+- 分析账号内部分项时，**必须使用 Excel 中的真实广告系列名称**（如「WearNuage 账号下 CBO一号内裤蛊池 ROI=2.13」），**禁止**使用 Retargeting 1/2/3/4/5/6、CBO 广告 等泛化代号。
 - 每个渠道的数据是一份「记录列表」，每条记录对应一天（或一行）的原始字段，字段名以实际数据为准（可能包含消耗/Spend/Cost、曝光、点击、转化、ROAS、CPA、销售额/Revenue/Sales、订单数等）。
 - 若某渠道在该区间无数据，会用文字注明"该渠道此区间无数据"，请正常处理，不要编造数据，也不要因此中断对其他渠道的分析。
 
@@ -1314,49 +1439,87 @@ def _fmt_metric(val) -> str:
     return f"{f:,.2f}"
 
 
-def _humanize_campaign_suffix(suffix: str) -> str:
-    """将 ROI_CBO / ROI_Retargeting_4 等列名后缀转为可读中文。"""
-    s = re.sub(r"\s+", " ", str(suffix or "").replace("_", " ")).strip()
-    if not s:
-        return "未知分项"
-    upper = s.upper()
-    if upper == "CBO":
-        return "CBO 广告"
-    if upper in ("总", "TOTAL"):
-        return "汇总"
-    m = re.match(r"(?i)retargeting\s*(\d+)", s)
-    if m:
-        return f"Retargeting {m.group(1)} 系列"
-    m = re.match(r"(?i)prospecting\s*(\d+)?", s)
-    if m:
-        num = m.group(1)
-        return f"Prospecting {num} 系列" if num else "Prospecting 系列"
-    return s
+_GENERIC_CAMPAIGN_TOKENS = frozenset({
+    "cbo", "retargeting", "prospecting", "total", "总", "ad", "spent",
+})
+
+
+def _extract_campaign_label(suffix: str) -> str:
+    """从拍平后的列名片段提取真实广告系列名称（优先中文名如 CBO一号内裤蛊池）。"""
+    raw = str(suffix or "").strip()
+    if not raw:
+        return "未知系列"
+    parts = [p.strip() for p in raw.split("_") if p.strip() and p.strip().lower() != "nan"]
+    if not parts:
+        return raw
+
+    cn_parts = [p for p in parts if re.search(r"[\u4e00-\u9fff]", p)]
+    if cn_parts:
+        return cn_parts[0]
+
+    non_generic = [
+        p for p in parts
+        if p.lower() not in _GENERIC_CAMPAIGN_TOKENS
+        and not re.fullmatch(r"(?i)retargeting\s*\d+", p.replace("_", " "))
+        and not re.fullmatch(r"(?i)prospecting\s*\d*", p.replace("_", " "))
+    ]
+    if non_generic:
+        label = non_generic[-1]
+        if re.fullmatch(r"\d+", label) and len(parts) > 1:
+            return "_".join(parts)
+        return label
+
+    if len(parts) == 1 and parts[0].upper() in ("CBO", "TOTAL", "总"):
+        return parts[0]
+    return "_".join(parts)
 
 
 def _humanize_metric_field(key: str) -> str:
-    """指标列名 → 可读标签（保留原列名供对照）。"""
+    """指标列名 → 可读标签（保留真实广告系列名，保留原列名供对照）。"""
     raw = str(key).strip()
     kl = raw.lower().replace(" ", "")
     if kl.startswith("roi_"):
-        label = _humanize_campaign_suffix(raw[4:])
+        label = _extract_campaign_label(raw[4:])
         return f"{label} ROI"
     if kl.startswith("spent_") or kl.startswith("adspent_"):
-        label = _humanize_campaign_suffix(re.sub(r"(?i)^ad?\s*spent_", "", raw))
+        label = _extract_campaign_label(re.sub(r"(?i)^ad?\s*spent_", "", raw))
         return f"{label} 消耗"
     if kl.startswith("roas_"):
-        label = _humanize_campaign_suffix(raw[5:])
+        label = _extract_campaign_label(raw[5:])
         return f"{label} ROAS"
+    if "_" in raw:
+        parts = raw.split("_")
+        metric_tail = parts[-1].lower()
+        if metric_tail in ("roi", "roas", "spent", "cpm", "cpc", "ctr"):
+            label = _extract_campaign_label("_".join(parts[:-1]))
+            metric_name = {"spent": "消耗"}.get(metric_tail, metric_tail.upper())
+            return f"{label} {metric_name}"
+        label = _extract_campaign_label(raw)
+        if label != raw:
+            return label
     return raw
 
 
 def _is_account_submetric_column(key: str) -> bool:
     """同一 Meta 账号 Sheet 内的分项指标列（非独立渠道）。"""
-    kl = str(key).lower().replace(" ", "")
+    raw = str(key).strip()
+    kl = raw.lower().replace(" ", "")
     prefixes = ("roi_", "roas_", "spent_", "adspent_", "cpm_", "cpc_", "ctr_")
     if any(kl.startswith(p) for p in prefixes):
         suffix = re.sub(r"(?i)^(roi|roas|spent|adspent|cpm|cpc|ctr)_", "", kl)
         if suffix and suffix not in ("总", "total", "overall"):
+            if kl.startswith("adspent_") and not re.search(r"[\u4e00-\u9fff]", suffix):
+                return False
+            return True
+    parts = [p.strip() for p in raw.split("_") if p.strip()]
+    if len(parts) >= 2:
+        tail = parts[-1].lower()
+        if tail in ("roi", "roas", "spent", "cpm", "cpc", "ctr"):
+            body = "_".join(parts[:-1]).lower()
+            if body in ("总", "total", "overall"):
+                return False
+            if kl.startswith("adspent") or parts[0].lower() in ("ad", "adspent"):
+                return False
             return True
     return False
 
@@ -1365,10 +1528,10 @@ def _account_submetrics_markdown(sheet_name: str, row: dict) -> list[str]:
     """生成账号内分项指标表（避免 AI 把 ROI_CBO 误当成渠道名）。"""
     lines = [
         "",
-        f"**{sheet_name} 账号内分项（以下为指标列，不是独立渠道/账号）**",
+        f"**{sheet_name} 账号内各广告系列分项（以下为指标列，不是独立渠道/账号）**",
         "",
-        "| 投放类型 | 指标 | 数值 | 原 Excel 列名 |",
-        "|---------|------|------|--------------|",
+        "| 广告系列名称 | 指标 | 数值 | 原 Excel 列名 |",
+        "|-------------|------|------|--------------|",
     ]
     rows_added = 0
     for key, val in row.items():
@@ -2395,9 +2558,10 @@ REPORT_SECTIONS = [
             "- 3~5 条 bullet：**增长引擎**（Sheet 渠道名 + 具体 ROAS/消耗数字 + 原因）\n"
             "- 3~5 条 bullet：**拖后腿渠道**（Sheet 渠道名 + 具体问题数字 + 风险）\n"
             "- 2~3 条 cross-channel 对比结论（如 Meta vs Google vs AppLovin）\n"
-            "**渠道层级规则**：仅 Excel **Sheet 名**（如 WearNuage、Google）算渠道/账号。"
-            "`ROI_CBO`、`ROI_Retargeting_*` 等是 WearNuage **Sheet 内的投放类型指标列**，"
-            "引用时写「WearNuage 的 CBO 广告 ROI=…」，**禁止**把列名当作独立渠道名。\n"
+            "**渠道层级规则**：仅 Excel **Sheet 名**（如 WearNuage、Google）算渠道/账号。\n"
+            "账号内拆解时必须引用 Excel 表头中的**真实广告系列名称**（如 CBO一号内裤蛊池、CBO二号内裤蛊池），"
+            "**禁止**使用 Retargeting 1/2/3/4/5/6、CBO 广告 等泛化代号；"
+            "引用格式示例：「WearNuage 的 CBO一号内裤蛊池 ROI=2.13」。\n"
             "**禁止**写第一、二、四章；**禁止**重新输出 Markdown 表格。"
         ),
         "min_chars": 200,
@@ -2583,6 +2747,7 @@ def build_followup_system_prompt() -> str:
 
 # 要求
 - 必须结合提供的**数据摘要**与**已生成报告**作答，引用具体数字（消耗、ROAS、ROI、订单等）
+- Meta 账号内引用广告系列时，**必须使用 Excel 表头中的真实系列名称**（如 CBO一号内裤蛊池），**禁止**使用 Retargeting 1/2/3 等泛化代号
 - 回答简洁、可执行，使用简体中文
 - 数据不足以回答时，明确说明缺少哪些字段或渠道
 - **不要**整段复述报告，不要编造未提供的数据
