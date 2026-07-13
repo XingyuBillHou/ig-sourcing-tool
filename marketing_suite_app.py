@@ -19,21 +19,17 @@ for path in (str(ROOT), str(FB_DIR)):
         sys.path.insert(0, path)
 
 import ad_analysis_app
-from fb_competitor_ad_core import (  # noqa: E402
-    APIFY_TOKEN_SESSION_KEY,
-    GEMINI_MODEL,
-    GEMINI_MODEL_SESSION_KEY,
-    _is_capable_gemini_video_model,
-    _on_redetect_gemini_proxy,
-    _sanitize_apify_token,
-    _secret as fb_secret,
-    apply_gemini_proxy,
-    check_gemini_connectivity,
-    get_gemini_model_label,
-    get_gemini_video_model_options,
-    init_gemini_proxy_for_session,
-    render_fb_competitor_tool,
-)
+
+_FB_CORE = None
+
+
+def _fb_core():
+    global _FB_CORE
+    if _FB_CORE is None:
+        import fb_competitor_ad_core as mod
+
+        _FB_CORE = mod
+    return _FB_CORE
 from suite_shared import (
     GEMINI_KEY_VALIDATION_VERSION,
     SUITE_DEPLOY_VERSION,
@@ -63,8 +59,9 @@ st.set_page_config(
 
 
 def _init_shared_session_state() -> None:
-    if APIFY_TOKEN_SESSION_KEY not in st.session_state:
-        st.session_state[APIFY_TOKEN_SESSION_KEY] = secret("apify", "token")
+    fb = _fb_core()
+    if fb.APIFY_TOKEN_SESSION_KEY not in st.session_state:
+        st.session_state[fb.APIFY_TOKEN_SESSION_KEY] = secret("apify", "token")
     if SUITE_GEMINI_API_KEY not in st.session_state:
         st.session_state[SUITE_GEMINI_API_KEY] = secret("gemini", "api_key")
     if SUITE_SMTP_HOST not in st.session_state:
@@ -78,21 +75,22 @@ def _init_shared_session_state() -> None:
     if SUITE_SMTP_FROM_NAME not in st.session_state:
         st.session_state[SUITE_SMTP_FROM_NAME] = secret("email", "from_name", SUITE_TITLE)
 
-    _model_options = get_gemini_video_model_options()
+    _model_options = fb.get_gemini_video_model_options()
     _model_ids = [item["id"] for item in _model_options]
-    _default_model = (secret("gemini", "model", GEMINI_MODEL) or GEMINI_MODEL).strip()
-    if not _is_capable_gemini_video_model(_default_model) or _default_model not in _model_ids:
-        _default_model = GEMINI_MODEL
-    if GEMINI_MODEL_SESSION_KEY not in st.session_state:
-        st.session_state[GEMINI_MODEL_SESSION_KEY] = _default_model
+    _default_model = (secret("gemini", "model", fb.GEMINI_MODEL) or fb.GEMINI_MODEL).strip()
+    if not fb._is_capable_gemini_video_model(_default_model) or _default_model not in _model_ids:
+        _default_model = fb.GEMINI_MODEL
+    if fb.GEMINI_MODEL_SESSION_KEY not in st.session_state:
+        st.session_state[fb.GEMINI_MODEL_SESSION_KEY] = _default_model
 
     if "suite_ad_analysis_model" not in st.session_state:
         st.session_state["suite_ad_analysis_model"] = ad_analysis_app.GEMINI_DEFAULT_MODEL
 
 
 def _render_shared_sidebar() -> None:
+    fb = _fb_core()
     _init_shared_session_state()
-    auto_proxy, auto_source = init_gemini_proxy_for_session()
+    auto_proxy, auto_source = fb.init_gemini_proxy_for_session()
     if "gemini_proxy_field" not in st.session_state:
         st.session_state.gemini_proxy_field = auto_proxy or secret("gemini", "proxy_url")
 
@@ -103,12 +101,12 @@ def _render_shared_sidebar() -> None:
             "Apify API Token",
             type="password",
             help="FB 广告库浅捞使用；Apify → Settings → Integrations 获取。",
-            key=APIFY_TOKEN_SESSION_KEY,
+            key=fb.APIFY_TOKEN_SESSION_KEY,
         )
-        secret_apify = _sanitize_apify_token(secret("apify", "token"))
+        secret_apify = fb._sanitize_apify_token(secret("apify", "token"))
         if secret_apify:
             st.caption("✅ Secrets 中已配置 Apify Token")
-        elif (st.session_state.get(APIFY_TOKEN_SESSION_KEY) or "").strip():
+        elif (st.session_state.get(fb.APIFY_TOKEN_SESSION_KEY) or "").strip():
             st.caption("✅ 使用侧边栏填写的 Apify Token")
         else:
             st.caption("⚠️ 未配置 Apify Token（仅影响 FB 浅捞）")
@@ -156,13 +154,13 @@ def _render_shared_sidebar() -> None:
                 "🔄",
                 help="重新检测代理",
                 key="suite_redetect_gemini_proxy",
-                on_click=_on_redetect_gemini_proxy,
+                on_click=fb._on_redetect_gemini_proxy,
             )
 
         if gemini_proxy:
-            apply_gemini_proxy(gemini_proxy)
+            fb.apply_gemini_proxy(gemini_proxy)
         elif auto_proxy:
-            apply_gemini_proxy(auto_proxy)
+            fb.apply_gemini_proxy(auto_proxy)
 
         if auto_source:
             if auto_proxy:
@@ -171,7 +169,7 @@ def _render_shared_sidebar() -> None:
                 st.caption(f"⚠️ {auto_source}")
 
         if st.button("🔌 测试 Gemini 连接", use_container_width=True, key="suite_test_gemini"):
-            ok, err = check_gemini_connectivity(gemini_proxy or auto_proxy)
+            ok, err = fb.check_gemini_connectivity(gemini_proxy or auto_proxy)
             if ok:
                 st.success("✅ 可以连接 generativelanguage.googleapis.com")
             else:
@@ -179,13 +177,13 @@ def _render_shared_sidebar() -> None:
 
         st.markdown("---")
         with st.expander("🎬 FB 视频模型", expanded=False):
-            model_options = get_gemini_video_model_options()
+            model_options = fb.get_gemini_video_model_options()
             model_ids = [item["id"] for item in model_options]
             st.selectbox(
                 "Gemini 视频模型",
                 options=model_ids,
-                format_func=get_gemini_model_label,
-                key=GEMINI_MODEL_SESSION_KEY,
+                format_func=fb.get_gemini_model_label,
+                key=fb.GEMINI_MODEL_SESSION_KEY,
             )
 
         with st.expander("📊 投放分析模型", expanded=False):
@@ -237,12 +235,16 @@ def main() -> None:
     st.title(f"{SUITE_TITLE} · {SUITE_DEPLOY_VERSION}")
     st.caption("FB 广告库浅捞 · 投放数据 AI 分析（Gemini / Apify 密钥共用）")
 
-    tab_fb, tab_analysis = st.tabs(["🎬 FB 广告库浅捞", "📊 投放数据 AI 分析"])
+    page = st.radio(
+        "选择工具",
+        ["📊 投放数据 AI 分析", "🎬 FB 广告库浅捞"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
-    with tab_fb:
-        render_fb_competitor_tool(embedded=True)
-
-    with tab_analysis:
+    if page.startswith("🎬"):
+        _fb_core().render_fb_competitor_tool(embedded=True)
+    else:
         ad_analysis_app.main(embedded=True)
 
 

@@ -39,9 +39,20 @@ try:
     from apify_client.errors import ApifyApiError
 except ImportError:
     ApifyApiError = Exception
-import google.generativeai as genai
 
 import sys
+
+_GENAI = None
+
+
+def _genai():
+    """Lazy-load google.generativeai to avoid segfault on import (Python 3.14 + grpcio)."""
+    global _GENAI
+    if _GENAI is None:
+        import google.generativeai as genai_mod
+
+        _GENAI = genai_mod
+    return _GENAI
 
 _SUITE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SUITE_ROOT not in sys.path:
@@ -982,7 +993,7 @@ def check_video_keyword_relevance_gemini(
     finally:
         if video_file is not None:
             try:
-                genai.delete_file(video_file.name)
+                _genai().delete_file(video_file.name)
             except Exception:
                 pass
         if is_temp_compressed and compressed_path and os.path.exists(compressed_path):
@@ -2073,7 +2084,7 @@ def configure_gemini_client(
     _GEMINI_RUNTIME["model"] = resolve_gemini_model(model)
     socket.setdefaulttimeout(GEMINI_API_TIMEOUT_SEC)
     # generate_content / delete_file 走 REST + 环境代理；上传/轮询走 requests 直连实现
-    genai.configure(api_key=api_key, transport="rest")
+    _genai().configure(api_key=api_key, transport="rest")
 
 
 def _gemini_supports_thinking_budget(model_name: str) -> bool:
@@ -2966,7 +2977,7 @@ def _generate_hook_content_with_models(
         }
         if _gemini_supports_thinking_budget(candidate):
             gen_config["thinking_config"] = {"thinking_budget": 0}
-        model = genai.GenerativeModel(candidate)
+        model = _genai().GenerativeModel(candidate)
         try:
             if idx > 0 and on_status:
                 on_status(
@@ -3055,7 +3066,7 @@ def extract_video_hooks_with_gemini(
     finally:
         if video_file is not None:
             try:
-                genai.delete_file(video_file.name)
+                _genai().delete_file(video_file.name)
             except Exception:
                 pass
         if is_temp_compressed and compressed_path and os.path.exists(compressed_path):
