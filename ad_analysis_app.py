@@ -318,6 +318,21 @@ def _group_dates_by_iso_week(dates: list) -> list:
     return [groups[k] for k in sorted(groups.keys())]
 
 
+def iso_week_bounds(anchor: date) -> tuple:
+    """返回 anchor 所在 ISO 周的周一~周日（含周末三日）。"""
+    monday = anchor - timedelta(days=anchor.weekday())
+    sunday = monday + timedelta(days=6)
+    return monday, sunday
+
+
+def normalize_week_bounds(start: date, end: date) -> tuple:
+    """将仅含工作日逐日的部分范围扩展为完整 Mon~Sun 周。"""
+    if start is None or end is None:
+        return start, end
+    anchor = min(start, end)
+    return iso_week_bounds(anchor)
+
+
 def iso_week_range_for_bucket(week_pos: int, num_buckets: int, all_dates: list):
     """按 Week 汇总行顺序，与全局 ISO 周分组对齐（从最近一周往前匹配）。"""
     groups = _group_dates_by_iso_week(all_dates)
@@ -327,10 +342,10 @@ def iso_week_range_for_bucket(week_pos: int, num_buckets: int, all_dates: list):
         aligned = groups[-num_buckets:]
         if week_pos < len(aligned):
             g = aligned[week_pos]
-            return min(g), max(g)
+            return iso_week_bounds(min(g))
     if week_pos < len(groups):
         g = groups[week_pos]
-        return min(g), max(g)
+        return iso_week_bounds(min(g))
     return None, None
 
 
@@ -447,9 +462,15 @@ def infer_week_range(
         for i in range(start_row, end_row):
             if i < 0 or i >= len(cleaned_df):
                 continue
-            d = parse_any_date(cleaned_df.iloc[i][date_col], refs)
+            val = cleaned_df.iloc[i][date_col]
+            d = parse_any_date(val, refs)
             if d:
                 found.append(d)
+                continue
+            if is_weekend_label(val):
+                fri, sun = infer_weekend_range(cleaned_df, date_col, i)
+                if fri and sun:
+                    found.extend([fri, sun])
         return found
 
     prev_week = week_row_indices[pos - 1] if pos > 0 else -1
@@ -463,11 +484,11 @@ def infer_week_range(
                 aligned = iso_groups[-num_weeks:]
                 if pos < len(aligned):
                     g = aligned[pos]
-                    return min(g), max(g)
+                    return iso_week_bounds(min(g))
             if pos < len(iso_groups):
                 g = iso_groups[pos]
-                return min(g), max(g)
-        return min(before_dates), max(before_dates)
+                return iso_week_bounds(min(g))
+        return normalize_week_bounds(min(before_dates), max(before_dates))
 
     next_week = (
         week_row_indices[pos + 1]
@@ -476,12 +497,12 @@ def infer_week_range(
     )
     after_dates = _dates_between(row_idx + 1, next_week)
     if after_dates:
-        return min(after_dates), max(after_dates)
+        return normalize_week_bounds(min(after_dates), max(after_dates))
 
     if week_num is not None and refs:
         iso_dates = [d for d in refs if d.isocalendar().week == week_num]
         if iso_dates:
-            return min(iso_dates), max(iso_dates)
+            return iso_week_bounds(min(iso_dates))
 
     if all_dates and week_row_indices:
         return iso_week_range_for_bucket(pos, len(week_row_indices), all_dates)
@@ -504,13 +525,13 @@ def format_week_bucket_label(bucket: dict) -> str:
 
 
 def build_week_buckets_from_valid_dates(valid_dates: list) -> list:
-    """用逐日数据按 ISO 周生成 Week 选项（始终带日期范围，避免 Excel 重复 Week 行）。"""
+    """用逐日数据按 ISO 周生成 Week 选项（Mon~Sun 完整周，含周末三日）。"""
     if not valid_dates:
         return []
     groups = _group_dates_by_iso_week(valid_dates)
     buckets = []
     for i, g in enumerate(groups):
-        start, end = min(g), max(g)
+        start, end = iso_week_bounds(min(g))
         wn = start.isocalendar().week
         buckets.append({
             "bucket_index": i,
@@ -546,7 +567,11 @@ def enrich_week_buckets(week_buckets: list, sheets_dict: dict) -> list:
     enriched = []
     for bucket in week_buckets:
         nb = dict(bucket)
-        if not (nb.get("start") and nb.get("end")):
+        if nb.get("start") and nb.get("end"):
+            ws, we = normalize_week_bounds(nb["start"], nb["end"])
+            nb["start"] = ws
+            nb["end"] = we
+        elif not (nb.get("start") and nb.get("end")):
             start, end = iso_week_range_for_bucket(nb["bucket_index"], num, valid_dates)
             if start and end:
                 nb["start"] = start
@@ -1267,7 +1292,7 @@ def get_date_mode_options_for_report(
             return (
                 options,
                 "Week 周数据",
-                "周报：默认识别表格中日期列为 **Week** 的周汇总行。",
+                "周报：默认识别表格中日期列为 **Week** 的周汇总行（区间为周一~周日，含周末三日）。",
             )
         options = ["日期范围"]
         default = "日期范围"
@@ -1293,8 +1318,9 @@ def get_default_range_for_report(report_type: str, valid_dates: list) -> tuple:
         return None, None
     min_d, max_d = min(valid_dates), max(valid_dates)
     if report_type == "周报":
-        start = max(min_d, max_d - timedelta(days=6))
-        return start, max_d
+        max_d = max(valid_dates)
+        week_start, week_end = iso_week_bounds(max_d)
+        return max(min_d, week_start), week_end
     if report_type == "月报":
         month_start = max_d.replace(day=1)
         start = max(min_d, month_start)
@@ -1779,7 +1805,7 @@ def resolve_previous_period(
             f"{prev_bucket['start'].strftime('%Y-%m-%d')} ~ "
             f"{prev_bucket['end'].strftime('%Y-%m-%d')}（上一周末）"
         )
-        return ({"week_bucket": prev_bucket}, label)
+        return ({"weekend_bucket": prev_bucket}, label)
 
     if start_date is None or end_date is None:
         return None
@@ -3459,7 +3485,7 @@ def main(*, embedded: bool = False) -> None:
     if week_buckets:
         recent = ", ".join(format_week_bucket_label(b) for b in week_buckets[-4:])
         st.caption(
-            f"📌 可用 Week 周区间 {len(week_buckets)} 个（由逐日数据生成，含日期范围）；"
+            f"📌 可用 Week 周区间 {len(week_buckets)} 个（周一~周日完整周，含周末三日）；"
             f"最近：{recent}"
         )
     if weekend_buckets:
