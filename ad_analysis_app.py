@@ -53,8 +53,11 @@ os.environ.setdefault("PYTHONUTF8", "1")
 # ============================================================
 
 DATE_PATTERN = re.compile(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}')
+CN_WEEKDAY_DATE_RE = re.compile(
+    r'^(?P<date>\d{4}[/-]\d{1,2}[/-]\d{1,2})\s*(?:星期[一二三四五六日天]|周[一二三四五六日])?$'
+)
 WEEKEND_LABEL_RE = re.compile(r'周末|weekend', re.I)
-WEEK_LABEL_RE = re.compile(r'^week(?:\s*\d+)?$', re.I)
+WEEK_LABEL_RE = re.compile(r'^week\b', re.I)
 EXCEL_SERIAL_MIN = 35000
 EXCEL_SERIAL_MAX = 55000
 SKIP_ROW_LABEL_RE = re.compile(
@@ -76,6 +79,15 @@ def _try_excel_serial_date(val):
     except Exception:
         pass
     return None
+
+
+def _normalize_date_string(val) -> str:
+    """去掉「2025/12/18 星期四」类后缀，便于解析。"""
+    s = str(val).strip()
+    m = CN_WEEKDAY_DATE_RE.match(s)
+    if m:
+        return m.group("date").replace("/", "-")
+    return s
 
 
 def is_valid_date(val) -> bool:
@@ -103,7 +115,7 @@ def is_valid_date(val) -> bool:
     if isinstance(val, (int, float, np.integer, np.floating)):
         return _try_excel_serial_date(val) is not None
 
-    s = str(val).strip()
+    s = _normalize_date_string(val) if not isinstance(val, (pd.Timestamp, datetime, date)) else str(val).strip()
     if not s:
         return False
 
@@ -126,6 +138,9 @@ def to_date(val):
         serial_d = _try_excel_serial_date(val)
         if serial_d:
             return serial_d
+        normalized = _normalize_date_string(val)
+        if normalized != str(val).strip():
+            return pd.to_datetime(normalized).date()
         return pd.to_datetime(str(val).strip()).date()
     except Exception:
         return None
@@ -233,6 +248,8 @@ def is_data_row(row) -> bool:
     if is_skip_row_label(col0):
         return False
     if is_valid_date(col0) or is_md_dot_date(col0):
+        return int(row.iloc[1:].notna().sum()) >= 1
+    if CN_WEEKDAY_DATE_RE.match(str(col0).strip()):
         return int(row.iloc[1:].notna().sum()) >= 1
     return False
 
@@ -393,6 +410,8 @@ def is_week_label(val) -> bool:
     s = str(val).strip()
     if not s:
         return False
+    if re.search(r'weekend', s, re.I):
+        return False
     return bool(WEEK_LABEL_RE.match(s))
 
 
@@ -546,10 +565,13 @@ def build_week_buckets_from_valid_dates(valid_dates: list) -> list:
 
 
 def resolve_week_buckets_for_ui(sheets_dict: dict, valid_dates: list) -> list:
-    """优先用逐日数据生成带日期范围的 Week 列表；无逐日数据时回退 Excel Week 行。"""
+    """优先用 Excel 中「Week」汇总行；否则回退逐日 ISO 周。"""
+    excel_weeks = get_week_buckets(sheets_dict)
+    if excel_weeks:
+        return excel_weeks
     if valid_dates:
         return build_week_buckets_from_valid_dates(valid_dates)
-    return get_week_buckets(sheets_dict)
+    return []
 
 
 def enrich_week_buckets(week_buckets: list, sheets_dict: dict) -> list:
@@ -886,7 +908,21 @@ def _flatten_header_segment(raw: pd.DataFrame, header_start: int, segment_end: i
         return pd.DataFrame()
 
     data_block.columns = _dedupe_column_names(_build_column_names(header_block))
-    return data_block.reset_index(drop=True)
+    return _normalize_segment_dataframe(data_block.reset_index(drop=True))
+
+
+def _normalize_segment_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """拍平后统一日期列名为「日期」，避免多段表头 concat 时列错位。"""
+    if df is None or df.empty:
+        return df
+    date_col = find_date_column(df)
+    if date_col and date_col != "日期":
+        out = df.copy()
+        if "日期" in out.columns and out["日期"].notna().sum() == 0:
+            out = out.drop(columns=["日期"])
+        out = out.rename(columns={date_col: "日期"})
+        return out
+    return df
 
 
 def flatten_merged_header(raw: pd.DataFrame) -> pd.DataFrame:
