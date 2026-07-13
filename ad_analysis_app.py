@@ -1072,7 +1072,22 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def find_date_column(df: pd.DataFrame):
+def _streamlit_safe_preview_df(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
+    """转为 Arrow 兼容的字符串预览表，避免 Cloud 上 PyArrow 序列化崩溃。"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    preview = clean_columns(df).head(n).copy()
+    out = {}
+    for col in preview.columns:
+        out[str(col)] = [
+            ""
+            if val is None
+            or (isinstance(val, float) and np.isnan(val))
+            or (val != val)
+            else str(val)
+            for val in preview[col].tolist()
+        ]
+    return pd.DataFrame(out)
     """
     找到日期列：
     1. 优先匹配列名中含"日期"/"时间"/"date"的列；
@@ -3345,7 +3360,7 @@ def main(*, embedded: bool = False) -> None:
         for name, df in sheets.items():
             st.markdown(f"**{name}**  （共 {len(df)} 行，{len(df.columns)} 列）")
             try:
-                st.dataframe(clean_columns(df).head(5), use_container_width=True)
+                st.dataframe(_streamlit_safe_preview_df(df), width="stretch")
             except Exception as e:
                 st.warning(f"预览失败：{e}")
 
