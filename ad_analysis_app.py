@@ -1088,6 +1088,9 @@ def _streamlit_safe_preview_df(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
             for val in preview[col].tolist()
         ]
     return pd.DataFrame(out)
+
+
+def find_date_column(df: pd.DataFrame):
     """
     找到日期列：
     1. 优先匹配列名中含"日期"/"时间"/"date"的列；
